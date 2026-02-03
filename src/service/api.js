@@ -50,6 +50,7 @@ export function createApi(database, indexer) {
         fuzzy: fuzzy === 'true',
         project: project || null,
         language: language || null,
+        kind: req.query.kind || null,
         maxResults: parseInt(maxResults, 10) || 10
       });
 
@@ -150,6 +151,45 @@ export function createApi(database, indexer) {
         buildTimeMs: lastBuild?.buildTimeMs || null,
         indexStatus
       });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/find-member', (req, res) => {
+    try {
+      const { name, fuzzy, containingType, memberKind, project, language, maxResults } = req.query;
+
+      if (!name) {
+        return res.status(400).json({ error: 'name parameter required' });
+      }
+
+      const results = database.findMember(name, {
+        fuzzy: fuzzy === 'true',
+        containingType: containingType || null,
+        memberKind: memberKind || null,
+        project: project || null,
+        language: language || null,
+        maxResults: parseInt(maxResults, 10) || 20
+      });
+
+      res.json({ results });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/list-modules', (req, res) => {
+    try {
+      const { parent, project, language, depth } = req.query;
+
+      const results = database.listModules(parent || '', {
+        project: project || null,
+        language: language || null,
+        depth: parseInt(depth, 10) || 1
+      });
+
+      res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

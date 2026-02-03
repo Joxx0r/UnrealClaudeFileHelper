@@ -54,6 +54,23 @@ export class IndexDatabase {
       CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
       CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
 
+      CREATE TABLE IF NOT EXISTS members (
+        id INTEGER PRIMARY KEY,
+        type_id INTEGER REFERENCES types(id) ON DELETE CASCADE,
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        member_kind TEXT NOT NULL,
+        line INTEGER NOT NULL,
+        is_static INTEGER DEFAULT 0,
+        specifiers TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_members_name ON members(name);
+      CREATE INDEX IF NOT EXISTS idx_members_name_lower ON members(lower(name));
+      CREATE INDEX IF NOT EXISTS idx_members_type_id ON members(type_id);
+      CREATE INDEX IF NOT EXISTS idx_members_file_id ON members(file_id);
+      CREATE INDEX IF NOT EXISTS idx_members_kind ON members(member_kind);
+
       CREATE TABLE IF NOT EXISTS metadata (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -98,6 +115,30 @@ export class IndexDatabase {
         )
       `);
     }
+
+    const hasMembersTable = this.db.prepare(`
+      SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='members'
+    `).get().count > 0;
+
+    if (!hasMembersTable) {
+      this.db.exec(`
+        CREATE TABLE members (
+          id INTEGER PRIMARY KEY,
+          type_id INTEGER REFERENCES types(id) ON DELETE CASCADE,
+          file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          member_kind TEXT NOT NULL,
+          line INTEGER NOT NULL,
+          is_static INTEGER DEFAULT 0,
+          specifiers TEXT
+        );
+        CREATE INDEX idx_members_name ON members(name);
+        CREATE INDEX idx_members_name_lower ON members(lower(name));
+        CREATE INDEX idx_members_type_id ON members(type_id);
+        CREATE INDEX idx_members_file_id ON members(file_id);
+        CREATE INDEX idx_members_kind ON members(member_kind);
+      `);
+    }
   }
 
   close() {
@@ -132,6 +173,7 @@ export class IndexDatabase {
   deleteFile(path) {
     const file = this.getFileByPath(path);
     if (file) {
+      this.db.prepare('DELETE FROM members WHERE file_id = ?').run(file.id);
       this.db.prepare('DELETE FROM types WHERE file_id = ?').run(file.id);
       this.db.prepare('DELETE FROM files WHERE id = ?').run(file.id);
       return true;
@@ -140,6 +182,7 @@ export class IndexDatabase {
   }
 
   deleteFileById(fileId) {
+    this.db.prepare('DELETE FROM members WHERE file_id = ?').run(fileId);
     this.db.prepare('DELETE FROM types WHERE file_id = ?').run(fileId);
     this.db.prepare('DELETE FROM files WHERE id = ?').run(fileId);
   }
@@ -167,11 +210,171 @@ export class IndexDatabase {
   }
 
   clearTypesForFile(fileId) {
+    this.db.prepare('DELETE FROM members WHERE file_id = ?').run(fileId);
     this.db.prepare('DELETE FROM types WHERE file_id = ?').run(fileId);
   }
 
+  insertMembers(fileId, members) {
+    const stmt = this.db.prepare(`
+      INSERT INTO members (type_id, file_id, name, member_kind, line, is_static, specifiers)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertMany = this.db.transaction((items) => {
+      for (const item of items) {
+        stmt.run(
+          item.typeId || null,
+          fileId,
+          item.name,
+          item.memberKind,
+          item.line,
+          item.isStatic ? 1 : 0,
+          item.specifiers || null
+        );
+      }
+    });
+
+    insertMany(members);
+  }
+
+  clearMembersForFile(fileId) {
+    this.db.prepare('DELETE FROM members WHERE file_id = ?').run(fileId);
+  }
+
+  getTypeIdsForFile(fileId) {
+    return this.db.prepare('SELECT id, name FROM types WHERE file_id = ?').all(fileId);
+  }
+
+  findMember(name, options = {}) {
+    const { fuzzy = false, containingType = null, memberKind = null, project = null, language = null, maxResults = 20 } = options;
+
+    if (!fuzzy) {
+      let sql = `
+        SELECT m.*, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module, f.language
+        FROM members m
+        LEFT JOIN types t ON m.type_id = t.id
+        JOIN files f ON m.file_id = f.id
+        WHERE m.name = ?
+      `;
+      const params = [name];
+
+      if (containingType) {
+        sql += ' AND t.name = ?';
+        params.push(containingType);
+      }
+      if (memberKind) {
+        sql += ' AND m.member_kind = ?';
+        params.push(memberKind);
+      }
+      if (project) {
+        sql += ' AND f.project = ?';
+        params.push(project);
+      }
+      if (language && language !== 'all') {
+        sql += ' AND f.language = ?';
+        params.push(language);
+      }
+
+      sql += ' LIMIT ?';
+      params.push(maxResults);
+
+      return this.db.prepare(sql).all(...params);
+    }
+
+    const nameLower = name.toLowerCase();
+
+    let sql = `
+      SELECT m.*, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module, f.language
+      FROM members m
+      LEFT JOIN types t ON m.type_id = t.id
+      JOIN files f ON m.file_id = f.id
+      WHERE (
+        lower(m.name) LIKE ? OR
+        lower(m.name) LIKE ?
+      )
+    `;
+    const params = [`${nameLower}%`, `%${nameLower}%`];
+
+    if (containingType) {
+      sql += ' AND t.name = ?';
+      params.push(containingType);
+    }
+    if (memberKind) {
+      sql += ' AND m.member_kind = ?';
+      params.push(memberKind);
+    }
+    if (project) {
+      sql += ' AND f.project = ?';
+      params.push(project);
+    }
+    if (language && language !== 'all') {
+      sql += ' AND f.language = ?';
+      params.push(language);
+    }
+
+    sql += ' LIMIT ?';
+    params.push(maxResults * 3);
+
+    const candidates = this.db.prepare(sql).all(...params);
+
+    const scored = candidates.map(row => {
+      const candidateLower = row.name.toLowerCase();
+      let score = 0;
+
+      if (candidateLower === nameLower) score = 1.0;
+      else if (candidateLower.startsWith(nameLower)) score = 0.95;
+      else if (candidateLower.includes(nameLower)) score = 0.85;
+      else score = 0.5;
+
+      return { ...row, score };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, maxResults);
+  }
+
+  listModules(parent = '', options = {}) {
+    const { project = null, language = null, depth = 1 } = options;
+
+    let sql = 'SELECT module FROM files WHERE 1=1';
+    const params = [];
+
+    if (parent) {
+      sql += ' AND (module = ? OR module LIKE ?)';
+      params.push(parent, `${parent}.%`);
+    }
+
+    if (project) {
+      sql += ' AND project = ?';
+      params.push(project);
+    }
+
+    if (language && language !== 'all') {
+      sql += ' AND language = ?';
+      params.push(language);
+    }
+
+    const rows = this.db.prepare(sql).all(...params);
+
+    const moduleCounts = new Map();
+    const parentDepth = parent ? parent.split('.').length : 0;
+    const targetDepth = parentDepth + depth;
+
+    for (const row of rows) {
+      const parts = row.module.split('.');
+      if (parts.length <= parentDepth) continue;
+
+      const truncated = parts.slice(0, targetDepth).join('.');
+      moduleCounts.set(truncated, (moduleCounts.get(truncated) || 0) + 1);
+    }
+
+    return Array.from(moduleCounts.entries())
+      .map(([path, fileCount]) => ({ path, fileCount }))
+      .sort((a, b) => a.path.localeCompare(b.path));
+  }
+
   findTypeByName(name, options = {}) {
-    const { fuzzy = false, project = null, language = null, maxResults = 10 } = options;
+    const { fuzzy = false, project = null, language = null, kind = null, maxResults = 10 } = options;
 
     if (!fuzzy) {
       let sql = `
@@ -181,6 +384,11 @@ export class IndexDatabase {
         WHERE t.name = ?
       `;
       const params = [name];
+
+      if (kind) {
+        sql += ' AND t.kind = ?';
+        params.push(kind);
+      }
 
       if (project) {
         sql += ' AND f.project = ?';
@@ -227,6 +435,11 @@ export class IndexDatabase {
     `;
     const params = [`${nameLower}%`, `%${nameLower}%`, `%${nameStripped}%`];
 
+    if (kind) {
+      sql += ' AND t.kind = ?';
+      params.push(kind);
+    }
+
     if (project) {
       sql += ' AND f.project = ?';
       params.push(project);
@@ -270,7 +483,7 @@ export class IndexDatabase {
         SELECT t.*, f.path, f.project, f.module, f.language
         FROM types t
         JOIN files f ON t.file_id = f.id
-        WHERE t.parent = ? AND t.kind = 'class'
+        WHERE t.parent = ? AND t.kind IN ('class', 'struct', 'interface')
       `;
       const params = [parentClass];
 
@@ -301,7 +514,7 @@ export class IndexDatabase {
         SELECT t.*, f.path, f.project, f.module, f.language
         FROM types t
         JOIN files f ON t.file_id = f.id
-        WHERE t.parent = ? AND t.kind = 'class'
+        WHERE t.parent = ? AND t.kind IN ('class', 'struct', 'interface')
       `;
       const params = [current];
 
@@ -448,16 +661,28 @@ export class IndexDatabase {
       GROUP BY f.language
     `).all();
 
+    const totalMembers = this.db.prepare('SELECT COUNT(*) as count FROM members').get().count;
+
+    const memberKindCounts = this.db.prepare(`
+      SELECT member_kind, COUNT(*) as count FROM members GROUP BY member_kind
+    `).all();
+
     const stats = {
       totalFiles,
       totalTypes,
+      totalMembers,
       byKind: {},
+      byMemberKind: {},
       byLanguage: {},
       projects: {}
     };
 
     for (const { kind, count } of kindCounts) {
       stats.byKind[kind] = count;
+    }
+
+    for (const row of memberKindCounts) {
+      stats.byMemberKind[row.member_kind] = row.count;
     }
 
     for (const row of languageCounts) {

@@ -137,10 +137,10 @@ export class FileWatcher {
 
             const types = [];
             for (const cls of parsed.classes) {
-              types.push({ name: cls.name, kind: 'class', parent: cls.parent, line: cls.line });
+              types.push({ name: cls.name, kind: cls.kind || 'class', parent: cls.parent, line: cls.line });
             }
             for (const struct of parsed.structs) {
-              types.push({ name: struct.name, kind: 'struct', parent: null, line: struct.line });
+              types.push({ name: struct.name, kind: 'struct', parent: struct.parent || null, line: struct.line });
             }
             for (const en of parsed.enums) {
               types.push({ name: en.name, kind: 'enum', parent: null, line: en.line });
@@ -157,9 +157,32 @@ export class FileWatcher {
                 types.push({ name: ns.name, kind: 'namespace', parent: null, line: ns.line });
               }
             }
+            // C++ delegates
+            if (language === 'cpp') {
+              for (const del of parsed.delegates || []) {
+                types.push({ name: del.name, kind: 'delegate', parent: null, line: del.line });
+              }
+            }
 
             if (types.length > 0) {
               this.database.insertTypes(fileId, types);
+            }
+
+            // Insert members
+            if (parsed.members && parsed.members.length > 0) {
+              const typeIds = this.database.getTypeIdsForFile(fileId);
+              const nameToId = new Map(typeIds.map(t => [t.name, t.id]));
+
+              const resolvedMembers = parsed.members.map(m => ({
+                typeId: nameToId.get(m.ownerName) || null,
+                name: m.name,
+                memberKind: m.memberKind,
+                line: m.line,
+                isStatic: m.isStatic,
+                specifiers: m.specifiers
+              }));
+
+              this.database.insertMembers(fileId, resolvedMembers);
             }
           });
 

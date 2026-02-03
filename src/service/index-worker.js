@@ -32,7 +32,7 @@ async function processFiles() {
       for (const cls of parsed.classes) {
         types.push({
           name: cls.name,
-          kind: 'class',
+          kind: cls.kind || 'class',
           parent: cls.parent || null,
           line: cls.line
         });
@@ -42,7 +42,7 @@ async function processFiles() {
         types.push({
           name: struct.name,
           kind: 'struct',
-          parent: null,
+          parent: struct.parent || null,
           line: struct.line
         });
       }
@@ -85,12 +85,25 @@ async function processFiles() {
         }
       }
 
+      // C++ delegates from DECLARE_*DELEGATE* macros
+      if (language === 'cpp') {
+        for (const del of parsed.delegates || []) {
+          types.push({
+            name: del.name,
+            kind: 'delegate',
+            parent: null,
+            line: del.line
+          });
+        }
+      }
+
       results.push({
         path: file.path,
         project: file.project,
         module: file.module,
         mtime: file.mtime,
-        types
+        types,
+        members: parsed.members || []
       });
 
       typesFound += types.length;

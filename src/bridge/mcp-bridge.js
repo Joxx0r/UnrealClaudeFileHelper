@@ -96,6 +96,11 @@ class UnrealIndexBridge {
                   default: 'all',
                   description: 'Filter by language: all, angelscript, or cpp'
                 },
+                kind: {
+                  type: 'string',
+                  enum: ['class', 'struct', 'enum', 'interface', 'delegate', 'event', 'namespace'],
+                  description: 'Filter by type kind'
+                },
                 maxResults: {
                   type: 'number',
                   default: 10,
@@ -211,6 +216,77 @@ class UnrealIndexBridge {
                 }
               }
             }
+          },
+          {
+            name: 'unreal_find_member',
+            description: 'Find functions, properties, or enum values by name. Search across class/struct members in AngelScript and C++. Use this to find method implementations, property definitions, or enum values.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                name: {
+                  type: 'string',
+                  description: 'Member name to search for (e.g. BeginPlay, TakeDamage, MaxHealth, DeathCam)'
+                },
+                fuzzy: {
+                  type: 'boolean',
+                  default: false,
+                  description: 'Enable fuzzy/partial matching'
+                },
+                containingType: {
+                  type: 'string',
+                  description: 'Filter to members of a specific type (e.g. AActor, UWidget)'
+                },
+                memberKind: {
+                  type: 'string',
+                  enum: ['function', 'property', 'enum_value'],
+                  description: 'Filter by member kind'
+                },
+                project: {
+                  type: 'string',
+                  description: 'Filter by project'
+                },
+                language: {
+                  type: 'string',
+                  enum: ['all', 'angelscript', 'cpp'],
+                  default: 'all',
+                  description: 'Filter by language'
+                },
+                maxResults: {
+                  type: 'number',
+                  default: 20,
+                  description: 'Maximum results to return'
+                }
+              },
+              required: ['name']
+            }
+          },
+          {
+            name: 'unreal_list_modules',
+            description: 'List available modules/directories in the codebase. Use to discover code organization and navigate the module tree.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                parent: {
+                  type: 'string',
+                  description: 'Parent module path to list children of (empty for root level modules)'
+                },
+                project: {
+                  type: 'string',
+                  description: 'Filter by project'
+                },
+                language: {
+                  type: 'string',
+                  enum: ['all', 'angelscript', 'cpp'],
+                  default: 'all',
+                  description: 'Filter by language'
+                },
+                depth: {
+                  type: 'number',
+                  default: 1,
+                  description: 'How many levels deep to return'
+                }
+              }
+            }
           }
         ]
       };
@@ -227,6 +303,7 @@ class UnrealIndexBridge {
               fuzzy: args.fuzzy,
               project: args.project,
               language: args.language,
+              kind: args.kind,
               maxResults: args.maxResults
             });
             return {
@@ -276,6 +353,33 @@ class UnrealIndexBridge {
               ? `/refresh?language=${args.language}`
               : '/refresh';
             const result = await postService(endpoint);
+            return {
+              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+            };
+          }
+
+          case 'unreal_find_member': {
+            const result = await fetchService('/find-member', {
+              name: args.name,
+              fuzzy: args.fuzzy,
+              containingType: args.containingType,
+              memberKind: args.memberKind,
+              project: args.project,
+              language: args.language,
+              maxResults: args.maxResults
+            });
+            return {
+              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+            };
+          }
+
+          case 'unreal_list_modules': {
+            const result = await fetchService('/list-modules', {
+              parent: args.parent,
+              project: args.project,
+              language: args.language,
+              depth: args.depth
+            });
             return {
               content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
             };

@@ -89,6 +89,24 @@ export class BackgroundIndexer {
             if (fileResult.types.length > 0) {
               this.database.insertTypesBatch(fileId, fileResult.types);
             }
+
+            // Insert members (functions, properties, enum values)
+            const members = fileResult.members || [];
+            if (members.length > 0) {
+              const typeIds = this.database.getTypeIdsForFile(fileId);
+              const nameToId = new Map(typeIds.map(t => [t.name, t.id]));
+
+              const resolvedMembers = members.map(m => ({
+                typeId: nameToId.get(m.ownerName) || null,
+                name: m.name,
+                memberKind: m.memberKind,
+                line: m.line,
+                isStatic: m.isStatic,
+                specifiers: m.specifiers
+              }));
+
+              this.database.insertMembers(fileId, resolvedMembers);
+            }
           }
         });
 

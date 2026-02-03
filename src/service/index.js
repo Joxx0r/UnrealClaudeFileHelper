@@ -74,10 +74,6 @@ class UnrealIndexService {
     if (angelscriptEmpty) {
       console.log('AngelScript index empty, building synchronously...');
       await this.indexAngelscriptSync();
-    } else {
-      const stats = this.database.getStats();
-      const asStats = stats.byLanguage.angelscript || { files: 0, types: 0 };
-      console.log(`Loaded AngelScript index: ${asStats.files} files, ${asStats.types} types`);
     }
 
     const app = createApi(this.database, this);
@@ -101,14 +97,13 @@ class UnrealIndexService {
       console.log('Starting C++ indexing in background...');
       this.backgroundIndexer.indexLanguageAsync('cpp').then(() => {
         console.log('C++ background indexing complete');
+        this.printIndexSummary();
       }).catch(err => {
         console.error('C++ background indexing failed:', err);
       });
-    } else {
-      const stats = this.database.getStats();
-      const cppStats = stats.byLanguage.cpp || { files: 0, types: 0 };
-      console.log(`Loaded C++ index: ${cppStats.files} files, ${cppStats.types} types`);
     }
+
+    this.printIndexSummary();
 
     process.on('SIGINT', () => this.shutdown());
     process.on('SIGTERM', () => this.shutdown());
@@ -209,10 +204,10 @@ class UnrealIndexService {
 
               const typeList = [];
               for (const cls of parsed.classes) {
-                typeList.push({ name: cls.name, kind: 'class', parent: cls.parent, line: cls.line });
+                typeList.push({ name: cls.name, kind: cls.kind || 'class', parent: cls.parent, line: cls.line });
               }
               for (const struct of parsed.structs) {
-                typeList.push({ name: struct.name, kind: 'struct', parent: null, line: struct.line });
+                typeList.push({ name: struct.name, kind: 'struct', parent: struct.parent || null, line: struct.line });
               }
               for (const en of parsed.enums) {
                 typeList.push({ name: en.name, kind: 'enum', parent: null, line: en.line });
@@ -228,9 +223,32 @@ class UnrealIndexService {
                   typeList.push({ name: ns.name, kind: 'namespace', parent: null, line: ns.line });
                 }
               }
+              // C++ delegates from DECLARE_*DELEGATE* macros
+              if (language === 'cpp') {
+                for (const del of parsed.delegates || []) {
+                  typeList.push({ name: del.name, kind: 'delegate', parent: null, line: del.line });
+                }
+              }
 
               if (typeList.length > 0) {
                 this.database.insertTypes(fileId, typeList);
+              }
+
+              // Insert members (functions, properties, enum values)
+              if (parsed.members && parsed.members.length > 0) {
+                const typeIds = this.database.getTypeIdsForFile(fileId);
+                const nameToId = new Map(typeIds.map(t => [t.name, t.id]));
+
+                const resolvedMembers = parsed.members.map(m => ({
+                  typeId: nameToId.get(m.ownerName) || null,
+                  name: m.name,
+                  memberKind: m.memberKind,
+                  line: m.line,
+                  isStatic: m.isStatic,
+                  specifiers: m.specifiers
+                }));
+
+                this.database.insertMembers(fileId, resolvedMembers);
               }
 
               types += typeList.length;
@@ -264,6 +282,28 @@ class UnrealIndexService {
     const parts = relativePath.replace(/\.(as|h|cpp)$/, '').split('/');
     parts.pop();
     return [projectName, ...parts].join('.');
+  }
+
+  printIndexSummary() {
+    const stats = this.database.getStats();
+
+    console.log('--- Index Summary ---');
+    for (const [lang, langStats] of Object.entries(stats.byLanguage)) {
+      console.log(`  ${lang}: ${langStats.files} files, ${langStats.types} types`);
+    }
+
+    const kindEntries = Object.entries(stats.byKind);
+    if (kindEntries.length > 0) {
+      console.log(`  Types: ${kindEntries.map(([k, v]) => `${v} ${k}s`).join(', ')}`);
+    }
+
+    const memberEntries = Object.entries(stats.byMemberKind);
+    if (memberEntries.length > 0) {
+      console.log(`  Members: ${stats.totalMembers} total (${memberEntries.map(([k, v]) => `${v} ${k.replace('_', ' ')}s`).join(', ')})`);
+    } else {
+      console.log(`  Members: 0 (run POST /refresh to rebuild with member indexing)`);
+    }
+    console.log('---------------------');
   }
 
   shutdown() {
