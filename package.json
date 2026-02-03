@@ -1,13 +1,15 @@
 {
   "name": "unreal-index",
-  "version": "1.0.0",
-  "description": "MCP server for indexing Unreal Engine AngelScript files - provides fast class/struct/file lookups for Claude Code",
-  "main": "src/server.js",
+  "version": "2.0.0",
+  "description": "AngelScript index service with HTTP API and MCP bridge for Claude Code",
+  "main": "src/service/index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/server.js",
-    "build-index": "node src/build-index.js",
-    "test": "node --test src/*.test.js"
+    "start": "node src/service/index.js",
+    "bridge": "node src/bridge/mcp-bridge.js",
+    "legacy": "node src/server.js",
+    "test": "node --test src/*.test.js",
+    "stress-test": "node --test src/stress-test.js"
   },
   "keywords": [
     "mcp",
@@ -19,6 +21,9 @@
   "author": "Joxx0r",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^11.0.0",
+    "chokidar": "^4.0.0",
+    "express": "^4.21.0"
   }
 }

@@ -2,18 +2,48 @@
   "projects": [
     {
       "name": "Discovery",
-      "paths": ["D:\\p4\\games\\Games\\Discovery\\Script"]
+      "paths": ["D:\\p4\\games\\Games\\Discovery\\Script"],
+      "language": "angelscript",
+      "extensions": [".as"]
     },
     {
       "name": "Pioneer",
-      "paths": ["D:\\p4\\games\\Games\\Pioneer\\Script"]
+      "paths": ["D:\\p4\\games\\Games\\Pioneer\\Script"],
+      "language": "angelscript",
+      "extensions": [".as"]
     },
     {
       "name": "Shared",
       "paths": ["D:\\p4\\games\\Games\\Shared\\Plugins"],
+      "language": "angelscript",
+      "extensions": [".as"],
       "recursive": true
+    },
+    {
+      "name": "Engine",
+      "paths": ["D:\\p4\\games\\Games\\Engine\\Source"],
+      "language": "cpp",
+      "extensions": [".h", ".cpp"]
+    },
+    {
+      "name": "EnginePlugins",
+      "paths": ["D:\\p4\\games\\Games\\Engine\\Plugins"],
+      "language": "cpp",
+      "extensions": [".h", ".cpp"]
+    },
+    {
+      "name": "DiscoveryPlugins",
+      "paths": ["D:\\p4\\games\\Games\\Discovery\\Plugins"],
+      "language": "cpp",
+      "extensions": [".h", ".cpp"]
     }
   ],
-  "exclude": ["**/Editor/**", "**/*_Test.as"],
-  "cacheFile": "data/index.json"
+  "exclude": ["**/*_Test.as", "**/Intermediate/**", "**/ThirdParty/**"],
+  "service": {
+    "port": 3847,
+    "host": "127.0.0.1"
+  },
+  "watcher": {
+    "debounceMs": 100
+  }
 }
