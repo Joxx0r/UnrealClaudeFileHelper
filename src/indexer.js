@@ -178,6 +178,10 @@ export class Indexer {
     return [projectName, ...parts].join('.');
   }
 
+  stripPrefix(name) {
+    return name.replace(/^[UAFES]/, '');
+  }
+
   findTypeByName(name, options = {}) {
     if (!this.index) {
       return { error: 'Index not built' };
@@ -186,7 +190,19 @@ export class Indexer {
     const { fuzzy = false, project = null, maxResults = 10 } = options;
 
     if (!fuzzy) {
-      const entries = this.index.lookups.typeToFiles[name];
+      let entries = this.index.lookups.typeToFiles[name];
+
+      if (!entries) {
+        const nameWithoutPrefix = this.stripPrefix(name);
+        for (const prefix of ['U', 'A', 'F', 'E', 'S', '']) {
+          const tryName = prefix + nameWithoutPrefix;
+          if (tryName !== name && this.index.lookups.typeToFiles[tryName]) {
+            entries = this.index.lookups.typeToFiles[tryName];
+            break;
+          }
+        }
+      }
+
       if (!entries) {
         return { results: [] };
       }
@@ -198,9 +214,10 @@ export class Indexer {
             return null;
           }
 
-          const typeInfo = this.findTypeInFile(file, name, entry.kind);
+          const typeInfo = this.findTypeInFile(file, entry.kind === 'class' ? file.classes.find(c => this.index.lookups.typeToFiles[c.name] === entries)?.name || name : name, entry.kind);
+          const actualName = this.findActualName(file, entry.kind, entries);
           return {
-            name,
+            name: actualName,
             kind: entry.kind,
             file: file.path,
             relativePath: file.relativePath,
@@ -215,7 +232,7 @@ export class Indexer {
       return { results };
     }
 
-    const matches = this.fuzzyMatch(name, this.index.lookups.allTypeNames, maxResults);
+    const matches = this.fuzzyMatch(name, this.index.lookups.allTypeNames, maxResults * 3);
     const results = [];
 
     for (const match of matches) {
@@ -244,6 +261,24 @@ export class Indexer {
     return { results: results.slice(0, maxResults) };
   }
 
+  findActualName(file, kind, entries) {
+    const collections = {
+      class: file.classes,
+      struct: file.structs,
+      enum: file.enums,
+      event: file.events,
+      delegate: file.delegates,
+      namespace: file.namespaces
+    };
+    const collection = collections[kind] || [];
+    for (const item of collection) {
+      if (this.index.lookups.typeToFiles[item.name] === entries) {
+        return item.name;
+      }
+    }
+    return collection[0]?.name || '';
+  }
+
   findTypeInFile(file, name, kind) {
     const collections = {
       class: file.classes,
@@ -260,32 +295,84 @@ export class Indexer {
 
   fuzzyMatch(query, candidates, maxResults) {
     const queryLower = query.toLowerCase();
+    const queryStripped = this.stripPrefix(query).toLowerCase();
     const scored = [];
 
     for (const candidate of candidates) {
       const candidateLower = candidate.toLowerCase();
+      const candidateStripped = this.stripPrefix(candidate).toLowerCase();
 
       if (candidateLower === queryLower) {
         scored.push({ name: candidate, score: 1.0 });
         continue;
       }
 
+      if (candidateStripped === queryStripped) {
+        scored.push({ name: candidate, score: 0.98 });
+        continue;
+      }
+
       if (candidateLower.startsWith(queryLower)) {
-        scored.push({ name: candidate, score: 0.9 });
+        scored.push({ name: candidate, score: 0.95 });
+        continue;
+      }
+
+      if (candidateStripped.startsWith(queryStripped)) {
+        scored.push({ name: candidate, score: 0.93 });
+        continue;
+      }
+
+      if (candidateStripped.startsWith(queryLower)) {
+        scored.push({ name: candidate, score: 0.92 });
         continue;
       }
 
       if (candidateLower.includes(queryLower)) {
         const position = candidateLower.indexOf(queryLower);
-        const score = 0.7 - (position / candidate.length) * 0.2;
+        const score = 0.85 - (position / candidate.length) * 0.15;
         scored.push({ name: candidate, score });
         continue;
       }
 
-      const distance = this.levenshteinDistance(queryLower, candidateLower);
-      const maxLen = Math.max(query.length, candidate.length);
+      if (candidateStripped.includes(queryStripped)) {
+        const position = candidateStripped.indexOf(queryStripped);
+        const score = 0.80 - (position / candidateStripped.length) * 0.15;
+        scored.push({ name: candidate, score });
+        continue;
+      }
+
+      if (candidateStripped.includes(queryLower)) {
+        const position = candidateStripped.indexOf(queryLower);
+        const score = 0.75 - (position / candidateStripped.length) * 0.15;
+        scored.push({ name: candidate, score });
+        continue;
+      }
+
+      const wordsInCandidate = candidateStripped.replace(/([A-Z])/g, ' $1').toLowerCase().trim().split(/\s+/);
+      const queryWords = queryLower.split(/\s+/);
+      let wordMatchScore = 0;
+      for (const qWord of queryWords) {
+        for (const cWord of wordsInCandidate) {
+          if (cWord.startsWith(qWord)) {
+            wordMatchScore += 0.6 / queryWords.length;
+            break;
+          }
+          if (cWord.includes(qWord)) {
+            wordMatchScore += 0.4 / queryWords.length;
+            break;
+          }
+        }
+      }
+      if (wordMatchScore > 0.3) {
+        scored.push({ name: candidate, score: wordMatchScore });
+        continue;
+      }
+
+      const threshold = query.length < 5 ? 0.25 : 0.35;
+      const distance = this.levenshteinDistance(queryStripped, candidateStripped);
+      const maxLen = Math.max(queryStripped.length, candidateStripped.length);
       const similarity = 1 - distance / maxLen;
-      if (similarity > 0.4) {
+      if (similarity > threshold) {
         scored.push({ name: candidate, score: similarity * 0.5 });
       }
     }
@@ -327,7 +414,7 @@ export class Indexer {
       return { error: 'Index not built' };
     }
 
-    const { recursive = true } = options;
+    const { recursive = true, maxResults = 50, project = null } = options;
     const children = new Set();
     const queue = [parentClass];
 
@@ -352,6 +439,8 @@ export class Indexer {
 
       for (const entry of entries) {
         const file = this.index.files[entry.fileIndex];
+        if (project && file.project !== project) continue;
+
         const classInfo = file.classes.find(c => c.name === childName);
         results.push({
           name: childName,
@@ -362,10 +451,14 @@ export class Indexer {
           module: file.module,
           line: classInfo?.line || 1
         });
+
+        if (results.length >= maxResults) {
+          return { results, truncated: true, totalChildren: children.size };
+        }
       }
     }
 
-    return { results };
+    return { results, truncated: false, totalChildren: children.size };
   }
 
   browseModule(modulePath, options = {}) {
@@ -373,16 +466,20 @@ export class Indexer {
       return { error: 'Index not built' };
     }
 
-    const { project = null } = options;
+    const { project = null, maxResults = 100 } = options;
     const matchingModules = Object.keys(this.index.lookups.moduleToTypes)
       .filter(m => m === modulePath || m.startsWith(modulePath + '.'));
 
     const types = [];
     const files = new Set();
+    const seenTypes = new Set();
+    let truncated = false;
 
     for (const mod of matchingModules) {
       const moduleTypes = this.index.lookups.moduleToTypes[mod] || [];
       for (const type of moduleTypes) {
+        if (seenTypes.has(type.name)) continue;
+
         const entries = this.index.lookups.typeToFiles[type.name];
         if (!entries) continue;
 
@@ -392,23 +489,84 @@ export class Indexer {
           if (!matchingModules.includes(file.module)) continue;
 
           files.add(file.path);
-          const typeInfo = this.findTypeInFile(file, type.name, type.kind);
-          types.push({
-            name: type.name,
-            kind: type.kind,
-            file: file.path,
-            relativePath: file.relativePath,
-            line: typeInfo?.line || 1
-          });
+          if (!seenTypes.has(type.name)) {
+            seenTypes.add(type.name);
+            const typeInfo = this.findTypeInFile(file, type.name, type.kind);
+            types.push({
+              name: type.name,
+              kind: type.kind,
+              file: file.path,
+              relativePath: file.relativePath,
+              line: typeInfo?.line || 1
+            });
+
+            if (types.length >= maxResults) {
+              truncated = true;
+              break;
+            }
+          }
         }
+        if (truncated) break;
       }
+      if (truncated) break;
     }
 
     return {
       module: modulePath,
-      files: [...files],
-      types
+      files: [...files].slice(0, 50),
+      types,
+      truncated,
+      totalFiles: files.size
     };
+  }
+
+  findFileByName(filename, options = {}) {
+    if (!this.index) {
+      return { error: 'Index not built' };
+    }
+
+    const { project = null, maxResults = 20 } = options;
+    const filenameLower = filename.toLowerCase().replace(/\.as$/, '');
+    const results = [];
+
+    for (const file of this.index.files) {
+      if (project && file.project !== project) continue;
+
+      const baseName = file.relativePath.split('/').pop().replace(/\.as$/, '').toLowerCase();
+
+      let score = 0;
+      if (baseName === filenameLower) {
+        score = 1.0;
+      } else if (baseName.startsWith(filenameLower)) {
+        score = 0.9;
+      } else if (baseName.includes(filenameLower)) {
+        score = 0.7;
+      } else if (file.relativePath.toLowerCase().includes(filenameLower)) {
+        score = 0.5;
+      }
+
+      if (score > 0) {
+        const allTypes = [
+          ...file.classes.map(c => ({ ...c, kind: 'class' })),
+          ...file.structs.map(s => ({ ...s, kind: 'struct' })),
+          ...file.enums.map(e => ({ ...e, kind: 'enum' }))
+        ];
+
+        results.push({
+          file: file.path,
+          relativePath: file.relativePath,
+          project: file.project,
+          module: file.module,
+          score,
+          types: allTypes.slice(0, 10).map(t => ({ name: t.name, kind: t.kind, line: t.line }))
+        });
+      }
+
+      if (results.length >= maxResults * 2) break;
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return { results: results.slice(0, maxResults) };
   }
 
   getStats() {

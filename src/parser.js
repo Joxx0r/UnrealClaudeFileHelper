@@ -29,6 +29,7 @@ export function parseContent(content, filePath = '') {
 
   let pendingUClass = null;
   let pendingUClassLine = -1;
+  const seenNamespaces = new Set();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -95,10 +96,14 @@ export function parseContent(content, filePath = '') {
 
     const namespaceMatch = line.match(/^namespace\s+(\w+)/);
     if (namespaceMatch) {
-      result.namespaces.push({
-        name: namespaceMatch[1],
-        line: lineNum
-      });
+      const nsName = namespaceMatch[1];
+      if (!seenNamespaces.has(nsName)) {
+        seenNamespaces.add(nsName);
+        result.namespaces.push({
+          name: nsName,
+          line: lineNum
+        });
+      }
       continue;
     }
   }

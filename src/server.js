@@ -99,6 +99,15 @@ class UnrealIndexMCPServer {
                   type: 'boolean',
                   default: true,
                   description: 'Include all descendants, not just direct children'
+                },
+                project: {
+                  type: 'string',
+                  description: 'Filter by project (Discovery, Pioneer, Shared)'
+                },
+                maxResults: {
+                  type: 'number',
+                  default: 50,
+                  description: 'Maximum results to return'
                 }
               },
               required: ['parentClass']
@@ -117,9 +126,37 @@ class UnrealIndexMCPServer {
                 project: {
                   type: 'string',
                   description: 'Filter by project'
+                },
+                maxResults: {
+                  type: 'number',
+                  default: 100,
+                  description: 'Maximum types to return'
                 }
               },
               required: ['module']
+            }
+          },
+          {
+            name: 'angelscript_find_file',
+            description: 'Find AngelScript files by filename. Use when you know the file name but not the exact type/class name.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                filename: {
+                  type: 'string',
+                  description: 'Filename to search for (e.g. DiscoveryPlayerController, HUD, Widget)'
+                },
+                project: {
+                  type: 'string',
+                  description: 'Filter by project (Discovery, Pioneer, Shared)'
+                },
+                maxResults: {
+                  type: 'number',
+                  default: 20,
+                  description: 'Maximum results to return'
+                }
+              },
+              required: ['filename']
             }
           },
           {
@@ -152,7 +189,9 @@ class UnrealIndexMCPServer {
 
           case 'angelscript_find_children': {
             const result = this.indexer.findChildrenOf(args.parentClass, {
-              recursive: args.recursive !== false
+              recursive: args.recursive !== false,
+              project: args.project,
+              maxResults: args.maxResults || 50
             });
             return {
               content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
@@ -161,7 +200,18 @@ class UnrealIndexMCPServer {
 
           case 'angelscript_browse_module': {
             const result = this.indexer.browseModule(args.module, {
-              project: args.project
+              project: args.project,
+              maxResults: args.maxResults || 100
+            });
+            return {
+              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+            };
+          }
+
+          case 'angelscript_find_file': {
+            const result = this.indexer.findFileByName(args.filename, {
+              project: args.project,
+              maxResults: args.maxResults || 20
             });
             return {
               content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
