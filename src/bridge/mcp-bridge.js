@@ -73,7 +73,7 @@ class UnrealIndexBridge {
         tools: [
           {
             name: 'unreal_find_type',
-            description: 'Find file(s) containing a class, struct, enum, event, or delegate by name. Searches AngelScript and C++ code. Use this to quickly locate type definitions.',
+            description: 'Find file(s) containing a class, struct, enum, event, or delegate by name. Searches AngelScript, C++, and Blueprint assets. Use this to quickly locate type definitions.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -92,9 +92,9 @@ class UnrealIndexBridge {
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp'],
+                  enum: ['all', 'angelscript', 'cpp', 'blueprint'],
                   default: 'all',
-                  description: 'Filter by language: all, angelscript, or cpp'
+                  description: 'Filter by language: all, angelscript, cpp, or blueprint'
                 },
                 kind: {
                   type: 'string',
@@ -112,7 +112,7 @@ class UnrealIndexBridge {
           },
           {
             name: 'unreal_find_children',
-            description: 'Find all classes inheriting from a given parent class. Useful for understanding class hierarchies across AngelScript and C++.',
+            description: 'Find all classes inheriting from a given parent class. Includes source code types (AngelScript, C++) and Blueprint subclasses.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -131,9 +131,9 @@ class UnrealIndexBridge {
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp'],
+                  enum: ['all', 'angelscript', 'cpp', 'blueprint'],
                   default: 'all',
-                  description: 'Filter by language: all, angelscript, or cpp'
+                  description: 'Filter by language: all, angelscript, cpp, or blueprint'
                 },
                 maxResults: {
                   type: 'number',
@@ -262,7 +262,7 @@ class UnrealIndexBridge {
           },
           {
             name: 'unreal_find_asset',
-            description: 'Find Unreal assets (Blueprints, Materials, Maps, DataAssets, etc.) by name. Returns content browser paths. Works offline without a running editor.',
+            description: 'Find Unreal assets (Blueprints, Materials, Maps, DataAssets, etc.) by name. Returns content browser paths, asset class type, and parent class for Blueprints. Works offline without a running editor.',
             inputSchema: {
               type: 'object',
               properties: {

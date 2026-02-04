@@ -3,6 +3,7 @@ import { readdirSync, statSync } from 'fs';
 import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
 import os from 'os';
+import { parseUAssetHeader } from '../parsers/uasset-parser.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -253,6 +254,18 @@ export class BackgroundIndexer {
             const name = relativePath.split('/').pop().replace(/\.[^.]+$/, '');
             const folder = '/Game/' + relativePath.split('/').slice(0, -1).join('/');
 
+            // Parse .uasset header for class hierarchy info
+            let assetClass = null;
+            let parentClass = null;
+            if (ext === '.uasset') {
+              try {
+                const info = parseUAssetHeader(f.path);
+                assetClass = info.assetClass;
+                parentClass = info.parentClass;
+              } catch { /* skip unparseable */ }
+            }
+
+
             return {
               path: f.path,
               name,
@@ -260,7 +273,9 @@ export class BackgroundIndexer {
               folder: folder || '/Game',
               project: project.name,
               extension: ext,
-              mtime: f.mtime
+              mtime: f.mtime,
+              assetClass,
+              parentClass
             };
           });
 

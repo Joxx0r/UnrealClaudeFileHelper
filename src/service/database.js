@@ -79,7 +79,9 @@ export class IndexDatabase {
         folder TEXT NOT NULL,
         project TEXT NOT NULL,
         extension TEXT NOT NULL,
-        mtime INTEGER NOT NULL
+        mtime INTEGER NOT NULL,
+        asset_class TEXT,
+        parent_class TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(name);
@@ -156,6 +158,22 @@ export class IndexDatabase {
         CREATE INDEX idx_assets_content_path ON assets(content_path);
       `);
     }
+
+    // Migrate assets table to include asset_class and parent_class columns
+    const hasAssetClassColumn = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pragma_table_info('assets') WHERE name = 'asset_class'
+    `).get().count > 0;
+
+    if (!hasAssetClassColumn) {
+      this.db.exec(`ALTER TABLE assets ADD COLUMN asset_class TEXT`);
+      this.db.exec(`ALTER TABLE assets ADD COLUMN parent_class TEXT`);
+      // Clear assets to trigger re-index with new parser
+      this.db.exec(`DELETE FROM assets`);
+      this.db.exec(`DELETE FROM index_status WHERE language = 'content'`);
+    }
+    // Always ensure indexes exist (safe for both new and migrated databases)
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_assets_parent_class ON assets(parent_class)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_assets_asset_class ON assets(asset_class)`);
 
     const hasMembersTable = this.db.prepare(`
       SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='members'
@@ -417,45 +435,65 @@ export class IndexDatabase {
   findTypeByName(name, options = {}) {
     const { fuzzy = false, project = null, language = null, kind = null, maxResults = 10 } = options;
 
+    const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp';
+    const includeBlueprints = !language || language === 'all' || language === 'blueprint';
+
     if (!fuzzy) {
-      let sql = `
-        SELECT t.*, f.path, f.project, f.module, f.language
-        FROM types t
-        JOIN files f ON t.file_id = f.id
-        WHERE t.name = ?
-      `;
-      const params = [name];
+      let results = [];
 
-      if (kind) {
-        sql += ' AND t.kind = ?';
-        params.push(kind);
-      }
+      if (includeSourceTypes) {
+        let sql = `
+          SELECT t.*, f.path, f.project, f.module, f.language
+          FROM types t
+          JOIN files f ON t.file_id = f.id
+          WHERE t.name = ?
+        `;
+        const params = [name];
+        if (kind) { sql += ' AND t.kind = ?'; params.push(kind); }
+        if (project) { sql += ' AND f.project = ?'; params.push(project); }
+        if (language && language !== 'all' && language !== 'blueprint') {
+          sql += ' AND f.language = ?'; params.push(language);
+        }
+        sql += ' LIMIT ?';
+        params.push(maxResults);
 
-      if (project) {
-        sql += ' AND f.project = ?';
-        params.push(project);
-      }
+        results = this.db.prepare(sql).all(...params);
 
-      if (language && language !== 'all') {
-        sql += ' AND f.language = ?';
-        params.push(language);
-      }
-
-      sql += ' LIMIT ?';
-      params.push(maxResults);
-
-      let results = this.db.prepare(sql).all(...params);
-
-      if (results.length === 0) {
-        const nameWithoutPrefix = name.replace(/^[UAFESI]/, '');
-        for (const prefix of ['U', 'A', 'F', 'E', 'S', 'I', '']) {
-          const tryName = prefix + nameWithoutPrefix;
-          if (tryName !== name) {
-            params[0] = tryName;
-            results = this.db.prepare(sql).all(...params);
-            if (results.length > 0) break;
+        if (results.length === 0) {
+          const nameWithoutPrefix = name.replace(/^[UAFESI]/, '');
+          for (const prefix of ['U', 'A', 'F', 'E', 'S', 'I', '']) {
+            const tryName = prefix + nameWithoutPrefix;
+            if (tryName !== name) {
+              params[0] = tryName;
+              results = this.db.prepare(sql).all(...params);
+              if (results.length > 0) break;
+            }
           }
         }
+      }
+
+      // Also search Blueprint assets
+      if (includeBlueprints && results.length < maxResults) {
+        let assetSql = `
+          SELECT name, content_path as path, project, parent_class as parent, asset_class,
+                 'blueprint' as language, 'class' as kind, folder as module, 0 as line
+          FROM assets
+          WHERE name = ? AND asset_class IS NOT NULL
+        `;
+        const assetParams = [name];
+        if (project) { assetSql += ' AND project = ?'; assetParams.push(project); }
+        assetSql += ' LIMIT ?';
+        assetParams.push(maxResults - results.length);
+
+        let assetResults = this.db.prepare(assetSql).all(...assetParams);
+
+        // Try without _C suffix (BlueprintGeneratedClass names end in _C)
+        if (assetResults.length === 0 && name.endsWith('_C')) {
+          assetParams[0] = name.slice(0, -2);
+          assetResults = this.db.prepare(assetSql).all(...assetParams);
+        }
+
+        results.push(...assetResults);
       }
 
       return results;
@@ -464,37 +502,43 @@ export class IndexDatabase {
     const nameLower = name.toLowerCase();
     const nameStripped = name.replace(/^[UAFESI]/, '').toLowerCase();
 
-    let sql = `
-      SELECT t.*, f.path, f.project, f.module, f.language
-      FROM types t
-      JOIN files f ON t.file_id = f.id
-      WHERE (
-        lower(t.name) LIKE ? OR
-        lower(t.name) LIKE ? OR
-        lower(t.name) LIKE ?
-      )
-    `;
-    const params = [`${nameLower}%`, `%${nameLower}%`, `%${nameStripped}%`];
+    const candidates = [];
 
-    if (kind) {
-      sql += ' AND t.kind = ?';
-      params.push(kind);
+    if (includeSourceTypes) {
+      let sql = `
+        SELECT t.*, f.path, f.project, f.module, f.language
+        FROM types t
+        JOIN files f ON t.file_id = f.id
+        WHERE (
+          lower(t.name) LIKE ? OR
+          lower(t.name) LIKE ? OR
+          lower(t.name) LIKE ?
+        )
+      `;
+      const params = [`${nameLower}%`, `%${nameLower}%`, `%${nameStripped}%`];
+      if (kind) { sql += ' AND t.kind = ?'; params.push(kind); }
+      if (project) { sql += ' AND f.project = ?'; params.push(project); }
+      if (language && language !== 'all' && language !== 'blueprint') {
+        sql += ' AND f.language = ?'; params.push(language);
+      }
+      sql += ' LIMIT ?';
+      params.push(maxResults * 3);
+      candidates.push(...this.db.prepare(sql).all(...params));
     }
 
-    if (project) {
-      sql += ' AND f.project = ?';
-      params.push(project);
+    if (includeBlueprints) {
+      let assetSql = `
+        SELECT name, content_path as path, project, parent_class as parent, asset_class,
+               'blueprint' as language, 'class' as kind, folder as module, 0 as line
+        FROM assets
+        WHERE (lower(name) LIKE ? OR lower(name) LIKE ?) AND asset_class IS NOT NULL
+      `;
+      const assetParams = [`${nameLower}%`, `%${nameLower}%`];
+      if (project) { assetSql += ' AND project = ?'; assetParams.push(project); }
+      assetSql += ' LIMIT ?';
+      assetParams.push(maxResults * 2);
+      candidates.push(...this.db.prepare(assetSql).all(...assetParams));
     }
-
-    if (language && language !== 'all') {
-      sql += ' AND f.language = ?';
-      params.push(language);
-    }
-
-    sql += ' LIMIT ?';
-    params.push(maxResults * 3);
-
-    const candidates = this.db.prepare(sql).all(...params);
 
     const scored = candidates.map(row => {
       const candidateLower = row.name.toLowerCase();
@@ -519,29 +563,42 @@ export class IndexDatabase {
   findChildrenOf(parentClass, options = {}) {
     const { recursive = true, project = null, language = null, maxResults = 50 } = options;
 
+    const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp';
+    const includeBlueprints = !language || language === 'all' || language === 'blueprint';
+
     if (!recursive) {
-      let sql = `
-        SELECT t.*, f.path, f.project, f.module, f.language
-        FROM types t
-        JOIN files f ON t.file_id = f.id
-        WHERE t.parent = ? AND t.kind IN ('class', 'struct', 'interface')
-      `;
-      const params = [parentClass];
+      const results = [];
 
-      if (project) {
-        sql += ' AND f.project = ?';
-        params.push(project);
+      if (includeSourceTypes) {
+        let sql = `
+          SELECT t.*, f.path, f.project, f.module, f.language
+          FROM types t
+          JOIN files f ON t.file_id = f.id
+          WHERE t.parent = ? AND t.kind IN ('class', 'struct', 'interface')
+        `;
+        const params = [parentClass];
+        if (project) { sql += ' AND f.project = ?'; params.push(project); }
+        if (language && language !== 'all') { sql += ' AND f.language = ?'; params.push(language); }
+        sql += ' LIMIT ?';
+        params.push(maxResults);
+        results.push(...this.db.prepare(sql).all(...params));
       }
 
-      if (language && language !== 'all') {
-        sql += ' AND f.language = ?';
-        params.push(language);
+      if (includeBlueprints && results.length < maxResults) {
+        let assetSql = `
+          SELECT name, content_path as path, project, parent_class as parent, asset_class,
+                 'blueprint' as language, 'class' as kind, folder as module, 0 as line
+          FROM assets
+          WHERE parent_class = ? AND asset_class IS NOT NULL
+        `;
+        const assetParams = [parentClass];
+        if (project) { assetSql += ' AND project = ?'; assetParams.push(project); }
+        assetSql += ' LIMIT ?';
+        assetParams.push(maxResults - results.length);
+        results.push(...this.db.prepare(assetSql).all(...assetParams));
       }
 
-      sql += ' LIMIT ?';
-      params.push(maxResults);
-
-      return { results: this.db.prepare(sql).all(...params), truncated: false };
+      return { results, truncated: false };
     }
 
     // Phase 1: Traverse full inheritance tree WITHOUT project/language filter
@@ -552,11 +609,22 @@ export class IndexDatabase {
       SELECT t.name FROM types t
       WHERE t.parent = ? AND t.kind IN ('class', 'struct', 'interface')
     `);
+    const assetTraversalStmt = this.db.prepare(`
+      SELECT name FROM assets WHERE parent_class = ? AND asset_class IS NOT NULL
+    `);
 
     while (queue.length > 0) {
       const current = queue.shift();
       const directChildren = traversalStmt.all(current);
       for (const child of directChildren) {
+        if (!children.has(child.name)) {
+          children.add(child.name);
+          queue.push(child.name);
+        }
+      }
+      // Also check Blueprint assets for children
+      const assetChildren = assetTraversalStmt.all(current);
+      for (const child of assetChildren) {
         if (!children.has(child.name)) {
           children.add(child.name);
           queue.push(child.name);
@@ -569,31 +637,43 @@ export class IndexDatabase {
     }
 
     // Phase 2: Fetch full details, applying project/language filter to results only
+    const results = [];
     const names = [...children];
-    const placeholders = names.map(() => '?').join(',');
-    let sql = `
-      SELECT t.*, f.path, f.project, f.module, f.language
-      FROM types t
-      JOIN files f ON t.file_id = f.id
-      WHERE t.name IN (${placeholders})
-        AND t.kind IN ('class', 'struct', 'interface')
-    `;
-    const params = [...names];
 
-    if (project) {
-      sql += ' AND f.project = ?';
-      params.push(project);
+    if (includeSourceTypes) {
+      const placeholders = names.map(() => '?').join(',');
+      let sql = `
+        SELECT t.*, f.path, f.project, f.module, f.language
+        FROM types t
+        JOIN files f ON t.file_id = f.id
+        WHERE t.name IN (${placeholders})
+          AND t.kind IN ('class', 'struct', 'interface')
+      `;
+      const params = [...names];
+      if (project) { sql += ' AND f.project = ?'; params.push(project); }
+      if (language && language !== 'all' && language !== 'blueprint') {
+        sql += ' AND f.language = ?'; params.push(language);
+      }
+      sql += ' LIMIT ?';
+      params.push(maxResults);
+      results.push(...this.db.prepare(sql).all(...params));
     }
 
-    if (language && language !== 'all') {
-      sql += ' AND f.language = ?';
-      params.push(language);
+    if (includeBlueprints && results.length < maxResults) {
+      const placeholders = names.map(() => '?').join(',');
+      let assetSql = `
+        SELECT name, content_path as path, project, parent_class as parent, asset_class,
+               'blueprint' as language, 'class' as kind, folder as module, 0 as line
+        FROM assets
+        WHERE name IN (${placeholders}) AND asset_class IS NOT NULL
+      `;
+      const assetParams = [...names];
+      if (project) { assetSql += ' AND project = ?'; assetParams.push(project); }
+      assetSql += ' LIMIT ?';
+      assetParams.push(maxResults - results.length);
+      results.push(...this.db.prepare(assetSql).all(...assetParams));
     }
 
-    sql += ' LIMIT ?';
-    params.push(maxResults);
-
-    const results = this.db.prepare(sql).all(...params);
     const totalChildren = children.size;
     const truncated = results.length >= maxResults;
 
@@ -835,24 +915,31 @@ export class IndexDatabase {
 
   upsertAssetBatch(assets) {
     const stmt = this.db.prepare(`
-      INSERT INTO assets (path, name, content_path, folder, project, extension, mtime)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO assets (path, name, content_path, folder, project, extension, mtime, asset_class, parent_class)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(path) DO UPDATE SET
         name = excluded.name,
         content_path = excluded.content_path,
         folder = excluded.folder,
         project = excluded.project,
         extension = excluded.extension,
-        mtime = excluded.mtime
+        mtime = excluded.mtime,
+        asset_class = excluded.asset_class,
+        parent_class = excluded.parent_class
     `);
 
     const insertMany = this.db.transaction((items) => {
       for (const item of items) {
-        stmt.run(item.path, item.name, item.contentPath, item.folder, item.project, item.extension, item.mtime);
+        stmt.run(item.path, item.name, item.contentPath, item.folder, item.project, item.extension, item.mtime,
+          item.assetClass || null, item.parentClass || null);
       }
     });
 
     insertMany(assets);
+  }
+
+  deleteAsset(path) {
+    return this.db.prepare('DELETE FROM assets WHERE path = ?').run(path).changes > 0;
   }
 
   clearAssets(project) {
@@ -982,6 +1069,15 @@ export class IndexDatabase {
       SELECT extension, COUNT(*) as count FROM assets GROUP BY extension
     `).all();
 
-    return { total, byProject, byExtension };
+    const byAssetClass = this.db.prepare(`
+      SELECT COALESCE(asset_class, 'Unknown') as asset_class, COUNT(*) as count
+      FROM assets GROUP BY asset_class ORDER BY count DESC
+    `).all();
+
+    const blueprintCount = this.db.prepare(`
+      SELECT COUNT(*) as count FROM assets WHERE parent_class IS NOT NULL
+    `).get().count;
+
+    return { total, byProject, byExtension, byAssetClass, blueprintCount };
   }
 }

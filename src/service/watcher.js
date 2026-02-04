@@ -3,6 +3,7 @@ import { relative } from 'path';
 import { stat, readFile } from 'fs/promises';
 import { parseFile } from '../parser.js';
 import { parseCppContent } from '../parsers/cpp-parser.js';
+import { parseUAssetHeader } from '../parsers/uasset-parser.js';
 
 export class FileWatcher {
   constructor(config, database, options = {}) {
@@ -100,13 +101,61 @@ export class FileWatcher {
 
     for (const [filePath, eventType] of updates) {
       try {
+        const project = this.findProjectForPath(filePath);
+        if (!project && eventType !== 'unlink') continue;
+
+        const language = project?.language || 'angelscript';
+
+        // Handle content/asset file changes separately
+        if (language === 'content') {
+          if (eventType === 'unlink') {
+            const removed = this.database.deleteAsset(filePath);
+            if (removed) deleted++;
+          } else {
+            const basePath = this.findBasePathForFile(filePath, project);
+            if (!basePath) continue;
+
+            const fileStat = await stat(filePath);
+            const mtime = Math.floor(fileStat.mtimeMs);
+            const contentRoot = project.contentRoot || project.paths[0];
+            const relativePath = relative(contentRoot, filePath).replace(/\\/g, '/');
+            const ext = relativePath.match(/\.[^.]+$/)?.[0] || '';
+            const contentPath = '/Game/' + relativePath.replace(/\.[^.]+$/, '');
+            const name = relativePath.split('/').pop().replace(/\.[^.]+$/, '');
+            const folder = '/Game/' + relativePath.split('/').slice(0, -1).join('/');
+
+            let assetClass = null;
+            let parentClass = null;
+            if (ext === '.uasset') {
+              try {
+                const info = parseUAssetHeader(filePath);
+                assetClass = info.assetClass;
+                parentClass = info.parentClass;
+              } catch { /* skip */ }
+            }
+
+            this.database.upsertAssetBatch([{
+              path: filePath,
+              name,
+              contentPath,
+              folder: folder || '/Game',
+              project: project.name,
+              extension: ext,
+              mtime,
+              assetClass,
+              parentClass
+            }]);
+
+            if (eventType === 'add') added++;
+            else changed++;
+          }
+          continue;
+        }
+
         if (eventType === 'unlink') {
           const removed = this.database.deleteFile(filePath);
           if (removed) deleted++;
         } else {
-          const project = this.findProjectForPath(filePath);
-          if (!project) continue;
-
           const basePath = this.findBasePathForFile(filePath, project);
           if (!basePath) continue;
 
@@ -118,7 +167,6 @@ export class FileWatcher {
             continue;
           }
 
-          const language = project.language || 'angelscript';
           let parsed;
 
           if (language === 'cpp') {
