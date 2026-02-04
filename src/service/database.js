@@ -503,46 +503,60 @@ export class IndexDatabase {
       return { results: this.db.prepare(sql).all(...params), truncated: false };
     }
 
+    // Phase 1: Traverse full inheritance tree WITHOUT project/language filter
+    // so cross-project inheritance chains are followed completely
     const children = new Set();
     const queue = [parentClass];
-    const results = [];
+    const traversalStmt = this.db.prepare(`
+      SELECT t.name FROM types t
+      WHERE t.parent = ? AND t.kind IN ('class', 'struct', 'interface')
+    `);
 
-    while (queue.length > 0 && results.length < maxResults) {
+    while (queue.length > 0) {
       const current = queue.shift();
-
-      let sql = `
-        SELECT t.*, f.path, f.project, f.module, f.language
-        FROM types t
-        JOIN files f ON t.file_id = f.id
-        WHERE t.parent = ? AND t.kind IN ('class', 'struct', 'interface')
-      `;
-      const params = [current];
-
-      if (project) {
-        sql += ' AND f.project = ?';
-        params.push(project);
-      }
-
-      if (language && language !== 'all') {
-        sql += ' AND f.language = ?';
-        params.push(language);
-      }
-
-      const directChildren = this.db.prepare(sql).all(...params);
-
+      const directChildren = traversalStmt.all(current);
       for (const child of directChildren) {
         if (!children.has(child.name)) {
           children.add(child.name);
-          results.push(child);
           queue.push(child.name);
         }
       }
     }
 
+    if (children.size === 0) {
+      return { results: [], truncated: false, totalChildren: 0 };
+    }
+
+    // Phase 2: Fetch full details, applying project/language filter to results only
+    const names = [...children];
+    const placeholders = names.map(() => '?').join(',');
+    let sql = `
+      SELECT t.*, f.path, f.project, f.module, f.language
+      FROM types t
+      JOIN files f ON t.file_id = f.id
+      WHERE t.name IN (${placeholders})
+        AND t.kind IN ('class', 'struct', 'interface')
+    `;
+    const params = [...names];
+
+    if (project) {
+      sql += ' AND f.project = ?';
+      params.push(project);
+    }
+
+    if (language && language !== 'all') {
+      sql += ' AND f.language = ?';
+      params.push(language);
+    }
+
+    sql += ' LIMIT ?';
+    params.push(maxResults);
+
+    const results = this.db.prepare(sql).all(...params);
     const totalChildren = children.size;
     const truncated = results.length >= maxResults;
 
-    return { results: results.slice(0, maxResults), truncated, totalChildren };
+    return { results, truncated, totalChildren };
   }
 
   browseModule(modulePath, options = {}) {
