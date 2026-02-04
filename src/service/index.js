@@ -58,13 +58,19 @@ class UnrealIndexService {
   }
 
   async initialize() {
+    const totalStart = performance.now();
     await this.loadConfig();
 
     const { port, host } = this.config.service;
-    killExistingService(port);
 
+    let t = performance.now();
+    killExistingService(port);
+    console.log(`[Startup] kill existing: ${(performance.now() - t).toFixed(0)}ms`);
+
+    t = performance.now();
     const dbPath = join(__dirname, '..', '..', 'data', 'index.db');
     this.database = new IndexDatabase(dbPath).open();
+    console.log(`[Startup] database open: ${(performance.now() - t).toFixed(0)}ms`);
 
     this.backgroundIndexer = new BackgroundIndexer(this.database, this.config);
 
@@ -72,14 +78,16 @@ class UnrealIndexService {
     const cppEmpty = this.database.isLanguageEmpty('cpp');
 
     if (angelscriptEmpty) {
-      console.log('AngelScript index empty, building synchronously...');
+      t = performance.now();
+      console.log('[Startup] AngelScript index empty, building synchronously...');
       await this.indexAngelscriptSync();
+      console.log(`[Startup] angelscript sync index: ${((performance.now() - t) / 1000).toFixed(1)}s`);
     }
 
     const app = createApi(this.database, this);
 
     this.server = app.listen(port, host, () => {
-      console.log(`Unreal Index Service running at http://${host}:${port}`);
+      console.log(`[Startup] server listening at http://${host}:${port} (${((performance.now() - totalStart) / 1000).toFixed(1)}s total)`);
     });
 
     this.watcher = new FileWatcher(this.config, this.database, {

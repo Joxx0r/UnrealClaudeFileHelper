@@ -6,8 +6,30 @@ export function createApi(database, indexer) {
   const app = express();
   app.use(express.json());
 
+  // Request duration logging (skip /health to reduce noise)
+  app.use((req, res, next) => {
+    if (req.path === '/health') return next();
+    const start = performance.now();
+    res.on('finish', () => {
+      const ms = (performance.now() - start).toFixed(1);
+      const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+      console.log(`[API] ${req.method} ${req.path}${query} — ${ms}ms (${res.statusCode})`);
+    });
+    next();
+  });
+
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    const mem = process.memoryUsage();
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      uptimeSeconds: Math.round(process.uptime()),
+      memoryMB: {
+        heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+        heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
+        rss: Math.round(mem.rss / 1024 / 1024)
+      }
+    });
   });
 
   app.get('/status', (req, res) => {

@@ -94,6 +94,7 @@ export class FileWatcher {
   async processPendingUpdates() {
     const updates = new Map(this.pendingUpdates);
     this.pendingUpdates.clear();
+    const watcherStart = performance.now();
 
     let added = 0;
     let changed = 0;
@@ -243,7 +244,8 @@ export class FileWatcher {
     }
 
     if (added > 0 || changed > 0 || deleted > 0) {
-      console.log(`Index updated: +${added} ~${changed} -${deleted}`);
+      const ms = (performance.now() - watcherStart).toFixed(1);
+      console.log(`[Watcher] +${added} ~${changed} -${deleted} (${updates.size} files) — ${ms}ms`);
       this.onUpdate({ added, changed, deleted });
     }
   }

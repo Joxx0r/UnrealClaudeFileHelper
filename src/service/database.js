@@ -6,6 +6,8 @@ import { mkdirSync, existsSync } from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+const SLOW_QUERY_MS = 100;
+
 export class IndexDatabase {
   constructor(dbPath) {
     this.dbPath = dbPath || join(__dirname, '..', '..', 'data', 'index.db');
@@ -1080,4 +1082,23 @@ export class IndexDatabase {
 
     return { total, byProject, byExtension, byAssetClass, blueprintCount };
   }
+}
+
+// Wrap key methods with slow-query timing
+const methodsToTime = [
+  'findTypeByName', 'findChildrenOf', 'findMember', 'findFileByName',
+  'findAssetByName', 'getStats', 'getAssetStats', 'upsertAssetBatch'
+];
+for (const method of methodsToTime) {
+  const original = IndexDatabase.prototype[method];
+  IndexDatabase.prototype[method] = function (...args) {
+    const start = performance.now();
+    const result = original.apply(this, args);
+    const ms = performance.now() - start;
+    if (ms >= SLOW_QUERY_MS) {
+      const arg0 = typeof args[0] === 'string' ? `"${args[0]}"` : Array.isArray(args[0]) ? `[${args[0].length} items]` : '';
+      console.log(`[DB] ${method}(${arg0}) — ${ms.toFixed(1)}ms`);
+    }
+    return result;
+  };
 }

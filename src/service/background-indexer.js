@@ -32,6 +32,7 @@ export class BackgroundIndexer {
         return;
       }
 
+      const collectStart = performance.now();
       const files = [];
       for (const project of projects) {
         const extensions = project.extensions || (language === 'cpp' ? ['.h', '.cpp'] : ['.as']);
@@ -41,7 +42,7 @@ export class BackgroundIndexer {
         }
       }
 
-      console.log(`Found ${files.length} ${language} files to index`);
+      console.log(`[Indexer] collectFiles ${language}: ${((performance.now() - collectStart) / 1000).toFixed(1)}s (${files.length} files)`);
       this.database.setIndexStatus(language, 'indexing', 0, files.length);
 
       const workerCount = Math.min(8, os.cpus().length);
@@ -52,13 +53,15 @@ export class BackgroundIndexer {
         chunks.push(files.slice(i, i + chunkSize));
       }
 
-      console.log(`Starting ${chunks.length} workers for ${language} indexing`);
+      console.log(`[Indexer] starting ${chunks.length} workers for ${language}`);
+      const workerStart = performance.now();
 
       const workerPromises = chunks.map((chunk, index) =>
         this.runWorker(chunk, language, index)
       );
 
       const results = await Promise.all(workerPromises);
+      console.log(`[Indexer] workers ${language}: ${((performance.now() - workerStart) / 1000).toFixed(1)}s`);
 
       let totalProcessed = 0;
       let totalTypes = 0;
@@ -70,7 +73,8 @@ export class BackgroundIndexer {
         allFileResults.push(...result.results);
       }
 
-      console.log(`${language} workers complete: ${totalProcessed} files parsed, inserting into database...`);
+      const insertStart = performance.now();
+      console.log(`[Indexer] ${language} workers done: ${totalProcessed} files parsed, inserting into database...`);
 
       const BATCH_SIZE = 500;
       for (let i = 0; i < allFileResults.length; i += BATCH_SIZE) {
@@ -116,7 +120,8 @@ export class BackgroundIndexer {
         await new Promise(resolve => setImmediate(resolve));
       }
 
-      console.log(`${language} indexing complete: ${totalProcessed} files, ${totalTypes} types`);
+      console.log(`[Indexer] db insert ${language}: ${((performance.now() - insertStart) / 1000).toFixed(1)}s`)
+      console.log(`[Indexer] ${language} complete: ${totalProcessed} files, ${totalTypes} types`);
       this.database.setIndexStatus(language, 'ready', allFileResults.length, allFileResults.length);
 
     } catch (error) {
@@ -240,12 +245,13 @@ export class BackgroundIndexer {
         const contentRoot = project.contentRoot || project.paths[0];
         const extensions = project.extensions || ['.uasset', '.umap'];
 
-        console.log(`Scanning assets for ${project.name}...`);
+        const scanStart = performance.now();
         const files = this.collectFiles(contentRoot, project.name, extensions, 'content');
-        console.log(`Found ${files.length} assets in ${project.name}`);
+        console.log(`[Indexer] collectFiles ${project.name}: ${((performance.now() - scanStart) / 1000).toFixed(1)}s (${files.length} assets)`);
 
         const BATCH_SIZE = 5000;
         for (let i = 0; i < files.length; i += BATCH_SIZE) {
+          const batchStart = performance.now();
           const batch = files.slice(i, i + BATCH_SIZE);
           const assets = batch.map(f => {
             const relativePath = relative(contentRoot, f.path).replace(/\\/g, '/');
@@ -281,6 +287,7 @@ export class BackgroundIndexer {
 
           this.database.upsertAssetBatch(assets);
           totalAssets += batch.length;
+          console.log(`[Indexer] asset batch ${i}-${i + batch.length}: ${((performance.now() - batchStart) / 1000).toFixed(1)}s`);
           this.database.setIndexStatus('content', 'indexing', totalAssets, files.length);
 
           await new Promise(resolve => setImmediate(resolve));
