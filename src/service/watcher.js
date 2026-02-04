@@ -168,6 +168,16 @@ export class FileWatcher {
             continue;
           }
 
+          const relativePath = relative(basePath, filePath).replace(/\\/g, '/');
+          const module = this.deriveModule(relativePath, project.name, language);
+
+          // Config files (e.g. .ini) only need file-level indexing, no type parsing
+          if (language === 'config') {
+            this.database.upsertFile(filePath, project.name, module, mtime, language);
+            updatedFiles.push(filePath);
+            continue;
+          }
+
           let parsed;
 
           if (language === 'cpp') {
@@ -176,9 +186,6 @@ export class FileWatcher {
           } else {
             parsed = await parseFile(filePath);
           }
-
-          const relativePath = relative(basePath, filePath).replace(/\\/g, '/');
-          const module = this.deriveModule(relativePath, project.name, language);
 
           this.database.transaction(() => {
             const fileId = this.database.upsertFile(filePath, project.name, module, mtime, language);

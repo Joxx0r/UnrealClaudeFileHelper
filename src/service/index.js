@@ -84,6 +84,14 @@ class UnrealIndexService {
       console.log(`[Startup] angelscript sync index: ${((performance.now() - t) / 1000).toFixed(1)}s`);
     }
 
+    const configEmpty = this.database.isLanguageEmpty('config');
+    if (configEmpty) {
+      t = performance.now();
+      console.log('[Startup] Config index empty, building synchronously...');
+      await this.indexConfigSync();
+      console.log(`[Startup] config sync index: ${(performance.now() - t).toFixed(0)}ms`);
+    }
+
     const app = createApi(this.database, this);
 
     this.server = app.listen(port, host, () => {
@@ -158,6 +166,20 @@ class UnrealIndexService {
     return { totalFiles, totalTypes, buildTimeMs };
   }
 
+  async indexConfigSync() {
+    let totalFiles = 0;
+    const configProjects = this.config.projects.filter(p => p.language === 'config');
+    for (const project of configProjects) {
+      for (const basePath of project.paths) {
+        const { files } = await this.indexDirectory(basePath, project.name, basePath, 'config', project.extensions);
+        totalFiles += files;
+      }
+    }
+    console.log(`Config index built: ${totalFiles} files`);
+    this.database.setIndexStatus('config', 'ready', totalFiles, totalFiles);
+    return { totalFiles };
+  }
+
   async indexLanguageAsync(language) {
     return this.backgroundIndexer.indexLanguageAsync(language);
   }
@@ -183,11 +205,13 @@ class UnrealIndexService {
     return { status: 'started', message: 'AngelScript complete, C++ indexing in background' };
   }
 
-  async indexDirectory(dirPath, projectName, basePath, language = 'angelscript') {
+  async indexDirectory(dirPath, projectName, basePath, language = 'angelscript', extensions = null) {
     let files = 0;
     let types = 0;
 
-    const extensions = language === 'cpp' ? ['.h', '.cpp'] : ['.as'];
+    if (!extensions) {
+      extensions = language === 'cpp' ? ['.h', '.cpp'] : ['.as'];
+    }
 
     const scanDir = async (dir) => {
       let entries;
@@ -213,6 +237,13 @@ class UnrealIndexService {
             const mtime = Math.floor(fileStat.mtimeMs);
             const relativePath = relative(basePath, fullPath).replace(/\\/g, '/');
             const module = this.deriveModule(relativePath, projectName, language);
+
+            // Config files (e.g. .ini) only need file-level indexing, no type parsing
+            if (language === 'config') {
+              this.database.upsertFile(fullPath, projectName, module, mtime, language);
+              files++;
+              continue;
+            }
 
             const parsed = await parseFile(fullPath);
 
@@ -309,7 +340,11 @@ class UnrealIndexService {
     console.log('--- Index Summary ---');
     for (const [lang, langStats] of Object.entries(stats.byLanguage)) {
       if (lang === 'content') continue; // shown separately as assets
-      console.log(`  ${lang}: ${langStats.files} files, ${langStats.types} types`);
+      if (lang === 'config') {
+        console.log(`  ${lang}: ${langStats.files} files`);
+      } else {
+        console.log(`  ${lang}: ${langStats.files} files, ${langStats.types} types`);
+      }
     }
 
     if (assetStats.total > 0) {

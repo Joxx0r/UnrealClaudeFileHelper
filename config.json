@@ -38,6 +38,18 @@
       "extensions": [".h", ".cpp"]
     },
     {
+      "name": "DiscoveryConfig",
+      "paths": ["D:\\p4\\games\\Games\\Discovery\\Config"],
+      "language": "config",
+      "extensions": [".ini"]
+    },
+    {
+      "name": "EngineConfig",
+      "paths": ["D:\\p4\\games\\Games\\Engine\\Config"],
+      "language": "config",
+      "extensions": [".ini"]
+    },
+    {
       "name": "DiscoveryContent",
       "paths": ["D:\\p4\\games\\Games\\Discovery\\Content"],
       "contentRoot": "D:\\p4\\games\\Games\\Discovery\\Content",

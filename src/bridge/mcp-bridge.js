@@ -175,23 +175,23 @@ class UnrealIndexBridge {
           },
           {
             name: 'unreal_find_file',
-            description: 'Find source files by filename. Searches AngelScript (.as) and C++ (.h, .cpp) files.',
+            description: 'Find source files by filename. Searches AngelScript (.as), C++ (.h, .cpp), and config (.ini) files.',
             inputSchema: {
               type: 'object',
               properties: {
                 filename: {
                   type: 'string',
-                  description: 'Filename to search for (e.g. Actor, PlayerController, GameMode)'
+                  description: 'Filename to search for (e.g. Actor, PlayerController, GameMode, DefaultEngine.ini)'
                 },
                 project: {
                   type: 'string',
-                  description: 'Filter by project (Discovery, Pioneer, Shared, Engine, EnginePlugins, DiscoveryPlugins)'
+                  description: 'Filter by project (Discovery, Pioneer, Shared, Engine, EnginePlugins, DiscoveryPlugins, DiscoveryConfig, EngineConfig)'
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp'],
+                  enum: ['all', 'angelscript', 'cpp', 'config'],
                   default: 'all',
-                  description: 'Filter by language: all, angelscript, or cpp'
+                  description: 'Filter by language: all, angelscript, cpp, or config'
                 },
                 maxResults: {
                   type: 'number',
@@ -304,13 +304,13 @@ class UnrealIndexBridge {
                 },
                 project: {
                   type: 'string',
-                  description: 'Filter by project (Discovery, Pioneer, Shared, Engine, EnginePlugins, DiscoveryPlugins)'
+                  description: 'Filter by project (Discovery, Pioneer, Shared, Engine, EnginePlugins, DiscoveryPlugins, DiscoveryConfig, EngineConfig)'
                 },
                 language: {
                   type: 'string',
-                  enum: ['all', 'angelscript', 'cpp'],
+                  enum: ['all', 'angelscript', 'cpp', 'config'],
                   default: 'all',
-                  description: 'Filter by language: all, angelscript, or cpp'
+                  description: 'Filter by language: all, angelscript, cpp, or config'
                 },
                 caseSensitive: {
                   type: 'boolean',
