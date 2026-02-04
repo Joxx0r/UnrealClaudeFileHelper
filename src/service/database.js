@@ -8,6 +8,25 @@ const __dirname = dirname(__filename);
 
 const SLOW_QUERY_MS = 100;
 
+function dedupTypes(results) {
+  const best = new Map();
+  for (const r of results) {
+    const key = `${r.name}:${r.kind}`;
+    const existing = best.get(key);
+    if (!existing || scoreEntry(r) > scoreEntry(existing)) {
+      best.set(key, r);
+    }
+  }
+  return [...best.values()];
+}
+
+function scoreEntry(r) {
+  let s = 0;
+  if (r.parent) s += 10;
+  if (r.path && r.path.endsWith('.h')) s += 5;
+  return s;
+}
+
 export class IndexDatabase {
   constructor(dbPath) {
     this.dbPath = dbPath || join(__dirname, '..', '..', 'data', 'index.db');
@@ -498,7 +517,7 @@ export class IndexDatabase {
         results.push(...assetResults);
       }
 
-      return results;
+      return dedupTypes(results);
     }
 
     const nameLower = name.toLowerCase();
@@ -559,7 +578,7 @@ export class IndexDatabase {
     });
 
     scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, maxResults);
+    return dedupTypes(scored).slice(0, maxResults);
   }
 
   findChildrenOf(parentClass, options = {}) {
@@ -567,6 +586,11 @@ export class IndexDatabase {
 
     const includeSourceTypes = !language || language === 'all' || language === 'angelscript' || language === 'cpp';
     const includeBlueprints = !language || language === 'all' || language === 'blueprint';
+
+    const parentFound = !!(
+      this.db.prepare('SELECT 1 FROM types WHERE name = ? LIMIT 1').get(parentClass) ||
+      this.db.prepare('SELECT 1 FROM assets WHERE name = ? AND asset_class IS NOT NULL LIMIT 1').get(parentClass)
+    );
 
     if (!recursive) {
       const results = [];
@@ -600,7 +624,7 @@ export class IndexDatabase {
         results.push(...this.db.prepare(assetSql).all(...assetParams));
       }
 
-      return { results, truncated: false };
+      return { results, truncated: false, parentFound };
     }
 
     // Phase 1: Traverse full inheritance tree WITHOUT project/language filter
@@ -635,7 +659,7 @@ export class IndexDatabase {
     }
 
     if (children.size === 0) {
-      return { results: [], truncated: false, totalChildren: 0 };
+      return { results: [], truncated: false, totalChildren: 0, parentFound };
     }
 
     // Phase 2: Fetch full details, applying project/language filter to results only
@@ -679,7 +703,7 @@ export class IndexDatabase {
     const totalChildren = children.size;
     const truncated = results.length >= maxResults;
 
-    return { results, truncated, totalChildren };
+    return { results, truncated, totalChildren, parentFound };
   }
 
   browseModule(modulePath, options = {}) {
@@ -724,14 +748,18 @@ export class IndexDatabase {
     const { project = null, language = null, maxResults = 20 } = options;
     const filenameLower = filename.toLowerCase().replace(/\.(as|h|cpp)$/, '');
 
+    const exactFilePattern = `%/${filenameLower}.%`;
+    const startsWithPattern = `%/${filenameLower}%`;
+    const containsPattern = `%${filenameLower}%`;
+
     let sql = `
       SELECT f.*,
         CASE
           WHEN lower(f.path) LIKE ? THEN 1.0
-          WHEN lower(f.path) LIKE ? THEN 0.9
+          WHEN lower(f.path) LIKE ? THEN 0.85
           WHEN lower(f.path) LIKE ? THEN 0.7
           ELSE 0.5
-        END as score
+        END + (CASE WHEN lower(f.path) LIKE '%.h' THEN 0.01 ELSE 0 END) as score
       FROM files f
       WHERE (
         lower(f.path) LIKE ? OR
@@ -739,11 +767,7 @@ export class IndexDatabase {
       )
     `;
 
-    const exactPattern = `%${filenameLower}.%`;
-    const startsWithPattern = `%/${filenameLower}%`;
-    const containsPattern = `%${filenameLower}%`;
-
-    const params = [exactPattern, startsWithPattern, containsPattern, startsWithPattern, containsPattern];
+    const params = [exactFilePattern, startsWithPattern, containsPattern, startsWithPattern, containsPattern];
 
     if (project) {
       sql += ' AND f.project = ?';

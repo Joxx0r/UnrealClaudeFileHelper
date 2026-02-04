@@ -45,10 +45,10 @@ export function parseCppContent(content, filePath = '') {
     // DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FName, type, param)
     // DECLARE_DELEGATE_RetVal(RetType, FName)
     // DECLARE_EVENT(OwnerClass, FName)
-    const delegateMatch = trimmed.match(/^\s*DECLARE_(?:DYNAMIC_(?:MULTICAST_)?)?(?:MULTICAST_)?DELEGATE_RetVal(?:_\w+)?\s*\(\s*\w+\s*,\s*(\w+)/) ||
+    const delegateMatch = trimmed.match(/^\s*DECLARE_(?:DYNAMIC_(?:MULTICAST_)?)?(?:MULTICAST_)?DELEGATE_RetVal(?:_\w+)?\s*\(\s*[^,)]+\s*,\s*(\w+)/) ||
                           trimmed.match(/^\s*DECLARE_(?:DYNAMIC_(?:MULTICAST_)?)?(?:MULTICAST_)?DELEGATE(?:_\w+)?\s*\(\s*(\w+)/) ||
                           trimmed.match(/^\s*DECLARE_EVENT(?:_\w+)?\s*\(\s*\w+\s*,\s*(\w+)/);
-    if (delegateMatch) {
+    if (delegateMatch && delegateMatch[1].startsWith('F')) {
       result.delegates.push({
         name: delegateMatch[1],
         line: lineNum,
