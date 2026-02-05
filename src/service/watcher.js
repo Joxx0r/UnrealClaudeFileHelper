@@ -176,7 +176,7 @@ export class FileWatcher {
           // Config files (e.g. .ini) only need file-level indexing, no type parsing
           if (language === 'config') {
             this.database.upsertFile(filePath, project.name, module, mtime, language);
-            updatedFiles.push(filePath);
+            changed++;
             continue;
           }
 

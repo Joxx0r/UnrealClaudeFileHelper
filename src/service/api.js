@@ -67,7 +67,14 @@ export function createApi(database, indexer) {
       const indexStatus = database.getAllIndexStatus();
       const trigramStats = database.getTrigramStats();
       const trigramReady = database.isTrigramIndexReady();
-      statsCache = { ...stats, lastBuild, indexStatus, trigram: trigramStats ? { ...trigramStats, ready: trigramReady } : null };
+      const nameTrigramStats = database.getNameTrigramStats();
+      statsCache = {
+        ...stats,
+        lastBuild,
+        indexStatus,
+        trigram: trigramStats ? { ...trigramStats, ready: trigramReady } : null,
+        nameTrigram: nameTrigramStats
+      };
     } catch (err) {
       console.error(`[${new Date().toISOString()}] [Stats] cache refresh failed:`, err.message);
     }
@@ -307,6 +314,79 @@ export function createApi(database, indexer) {
   app.get('/asset-stats', (req, res) => {
     try {
       res.json(database.getAssetStats());
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Query Analytics ---
+
+  app.get('/query-analytics', (req, res) => {
+    try {
+      const { method, minDurationMs, limit, since, summary } = req.query;
+
+      if (summary === 'true') {
+        res.json(database.getQueryAnalyticsSummary());
+      } else {
+        const options = {
+          method: method || null,
+          minDurationMs: minDurationMs ? parseFloat(minDurationMs) : null,
+          limit: limit ? parseInt(limit) : 100,
+          since: since || null
+        };
+        res.json({ queries: database.getQueryAnalytics(options) });
+      }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/query-analytics', (req, res) => {
+    try {
+      const daysOld = req.query.daysOld ? parseInt(req.query.daysOld) : 7;
+      const deleted = database.cleanupOldAnalytics(daysOld);
+      res.json({ deleted, message: `Deleted ${deleted} analytics records older than ${daysOld} days` });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Name Trigram Index ---
+
+  app.get('/name-trigram-status', (req, res) => {
+    try {
+      res.json(database.getNameTrigramStats());
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/build-name-trigrams', (req, res) => {
+    try {
+      if (database.isNameTrigramIndexReady()) {
+        const stats = database.getNameTrigramStats();
+        return res.json({ message: 'Name trigram index already built', ...stats });
+      }
+
+      console.log(`[${new Date().toISOString()}] [NameTrigram] Building index...`);
+      const start = performance.now();
+
+      const result = database.buildNameTrigramIndex((entityType, current, total) => {
+        if (current % 10000 === 0) {
+          console.log(`[${new Date().toISOString()}] [NameTrigram] ${entityType}: ${current}/${total}`);
+        }
+      });
+
+      const duration = ((performance.now() - start) / 1000).toFixed(1);
+      console.log(`[${new Date().toISOString()}] [NameTrigram] Build complete in ${duration}s`);
+
+      refreshStatsCache();
+      res.json({
+        message: 'Name trigram index built successfully',
+        types: result.types,
+        members: result.members,
+        durationSeconds: parseFloat(duration)
+      });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

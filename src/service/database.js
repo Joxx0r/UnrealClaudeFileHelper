@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync, existsSync } from 'fs';
+import { extractTrigrams } from './trigram.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -245,6 +246,47 @@ export class IndexDatabase {
       // Flag that trigram index needs building from existing files
       this.setMetadata('trigramBuildNeeded', true);
     }
+
+    // Query analytics table for tracking slow queries
+    const hasQueryAnalyticsTable = this.db.prepare(`
+      SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='query_analytics'
+    `).get().count > 0;
+
+    if (!hasQueryAnalyticsTable) {
+      this.db.exec(`
+        CREATE TABLE query_analytics (
+          id INTEGER PRIMARY KEY,
+          timestamp TEXT NOT NULL,
+          method TEXT NOT NULL,
+          args TEXT,
+          duration_ms REAL NOT NULL,
+          result_count INTEGER,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX idx_query_analytics_method ON query_analytics(method);
+        CREATE INDEX idx_query_analytics_duration ON query_analytics(duration_ms DESC);
+        CREATE INDEX idx_query_analytics_timestamp ON query_analytics(timestamp);
+      `);
+    }
+
+    // Name trigrams table for fast fuzzy type/member search
+    const hasNameTrigramsTable = this.db.prepare(`
+      SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='name_trigrams'
+    `).get().count > 0;
+
+    if (!hasNameTrigramsTable) {
+      this.db.exec(`
+        CREATE TABLE name_trigrams (
+          trigram INTEGER NOT NULL,
+          entity_type TEXT NOT NULL,
+          entity_id INTEGER NOT NULL,
+          PRIMARY KEY (trigram, entity_type, entity_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX idx_name_trigrams_entity ON name_trigrams(entity_type, entity_id);
+      `);
+      // Flag that name trigram index needs building from existing types/members
+      this.setMetadata('nameTrigramBuildNeeded', true);
+    }
   }
 
   close() {
@@ -306,14 +348,25 @@ export class IndexDatabase {
   }
 
   insertTypes(fileId, types) {
-    const stmt = this.db.prepare(`
+    const typeStmt = this.db.prepare(`
       INSERT INTO types (file_id, name, kind, parent, line)
       VALUES (?, ?, ?, ?, ?)
+    `);
+    const trigramStmt = this.db.prepare(`
+      INSERT OR IGNORE INTO name_trigrams (trigram, entity_type, entity_id)
+      VALUES (?, 'type', ?)
     `);
 
     const insertMany = this.db.transaction((items) => {
       for (const item of items) {
-        stmt.run(fileId, item.name, item.kind, item.parent || null, item.line);
+        const result = typeStmt.run(fileId, item.name, item.kind, item.parent || null, item.line);
+        const typeId = result.lastInsertRowid;
+
+        // Insert name trigrams for fast fuzzy search
+        const trigrams = extractTrigrams(item.name);
+        for (const tri of trigrams) {
+          trigramStmt.run(tri, typeId);
+        }
       }
     });
 
@@ -321,19 +374,37 @@ export class IndexDatabase {
   }
 
   clearTypesForFile(fileId) {
+    // Get type IDs before deletion for trigram cleanup
+    const typeIds = this.db.prepare('SELECT id FROM types WHERE file_id = ?').all(fileId).map(r => r.id);
+    const memberIds = this.db.prepare('SELECT id FROM members WHERE file_id = ?').all(fileId).map(r => r.id);
+
+    // Delete name trigrams
+    if (typeIds.length > 0) {
+      const placeholders = typeIds.map(() => '?').join(',');
+      this.db.prepare(`DELETE FROM name_trigrams WHERE entity_type = 'type' AND entity_id IN (${placeholders})`).run(...typeIds);
+    }
+    if (memberIds.length > 0) {
+      const placeholders = memberIds.map(() => '?').join(',');
+      this.db.prepare(`DELETE FROM name_trigrams WHERE entity_type = 'member' AND entity_id IN (${placeholders})`).run(...memberIds);
+    }
+
     this.db.prepare('DELETE FROM members WHERE file_id = ?').run(fileId);
     this.db.prepare('DELETE FROM types WHERE file_id = ?').run(fileId);
   }
 
   insertMembers(fileId, members) {
-    const stmt = this.db.prepare(`
+    const memberStmt = this.db.prepare(`
       INSERT INTO members (type_id, file_id, name, member_kind, line, is_static, specifiers)
       VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const trigramStmt = this.db.prepare(`
+      INSERT OR IGNORE INTO name_trigrams (trigram, entity_type, entity_id)
+      VALUES (?, 'member', ?)
     `);
 
     const insertMany = this.db.transaction((items) => {
       for (const item of items) {
-        stmt.run(
+        const result = memberStmt.run(
           item.typeId || null,
           fileId,
           item.name,
@@ -342,6 +413,13 @@ export class IndexDatabase {
           item.isStatic ? 1 : 0,
           item.specifiers || null
         );
+        const memberId = result.lastInsertRowid;
+
+        // Insert name trigrams for fast fuzzy search
+        const trigrams = extractTrigrams(item.name);
+        for (const tri of trigrams) {
+          trigramStmt.run(tri, memberId);
+        }
       }
     });
 
@@ -393,40 +471,66 @@ export class IndexDatabase {
     }
 
     const nameLower = name.toLowerCase();
+    const candidates = [];
 
+    // Step 1: prefix match (fast, uses index)
     let sql = `
       SELECT m.*, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module, f.language
       FROM members m
       LEFT JOIN types t ON m.type_id = t.id
       JOIN files f ON m.file_id = f.id
-      WHERE (
-        lower(m.name) LIKE ? OR
-        lower(m.name) LIKE ?
-      )
+      WHERE lower(m.name) LIKE ?
     `;
-    const params = [`${nameLower}%`, `%${nameLower}%`];
+    const params = [`${nameLower}%`];
 
-    if (containingType) {
-      sql += ' AND t.name = ?';
-      params.push(containingType);
-    }
-    if (memberKind) {
-      sql += ' AND m.member_kind = ?';
-      params.push(memberKind);
-    }
-    if (project) {
-      sql += ' AND f.project = ?';
-      params.push(project);
-    }
-    if (language && language !== 'all') {
-      sql += ' AND f.language = ?';
-      params.push(language);
-    }
-
+    if (containingType) { sql += ' AND t.name = ?'; params.push(containingType); }
+    if (memberKind) { sql += ' AND m.member_kind = ?'; params.push(memberKind); }
+    if (project) { sql += ' AND f.project = ?'; params.push(project); }
+    if (language && language !== 'all') { sql += ' AND f.language = ?'; params.push(language); }
     sql += ' LIMIT ?';
     params.push(maxResults * 3);
+    candidates.push(...this.db.prepare(sql).all(...params));
 
-    const candidates = this.db.prepare(sql).all(...params);
+    // Step 2: trigram search for substring/reordered matches
+    if (candidates.length < maxResults && nameLower.length >= 3) {
+      const trigrams = [...extractTrigrams(nameLower)];
+      if (trigrams.length >= 3) {
+        const placeholders = trigrams.map(() => '?').join(',');
+        const minMatch = Math.max(3, Math.ceil(trigrams.length * 0.75));
+        const trigramSql = `
+          SELECT nt.entity_id
+          FROM name_trigrams nt
+          WHERE nt.entity_type = 'member' AND nt.trigram IN (${placeholders})
+          GROUP BY nt.entity_id
+          HAVING COUNT(DISTINCT nt.trigram) >= ?
+        `;
+        const candidateIds = this.db.prepare(trigramSql).all(...trigrams, minMatch).map(r => r.entity_id);
+
+        if (candidateIds.length > 0 && candidateIds.length < 1000) {
+          const existingIds = new Set(candidates.map(c => c.id));
+          const newIds = candidateIds.filter(id => !existingIds.has(id));
+
+          if (newIds.length > 0) {
+            const idPlaceholders = newIds.map(() => '?').join(',');
+            let trigramMemberSql = `
+              SELECT m.*, t.name as type_name, t.kind as type_kind, f.path, f.project, f.module, f.language
+              FROM members m
+              LEFT JOIN types t ON m.type_id = t.id
+              JOIN files f ON m.file_id = f.id
+              WHERE m.id IN (${idPlaceholders})
+            `;
+            const trigramParams = [...newIds];
+            if (containingType) { trigramMemberSql += ' AND t.name = ?'; trigramParams.push(containingType); }
+            if (memberKind) { trigramMemberSql += ' AND m.member_kind = ?'; trigramParams.push(memberKind); }
+            if (project) { trigramMemberSql += ' AND f.project = ?'; trigramParams.push(project); }
+            if (language && language !== 'all') { trigramMemberSql += ' AND f.language = ?'; trigramParams.push(language); }
+            trigramMemberSql += ' LIMIT ?';
+            trigramParams.push(maxResults * 2);
+            candidates.push(...this.db.prepare(trigramMemberSql).all(...trigramParams));
+          }
+        }
+      }
+    }
 
     const scored = candidates.map(row => {
       const candidateLower = row.name.toLowerCase();
@@ -578,17 +682,17 @@ export class IndexDatabase {
     const candidates = [];
 
     if (includeSourceTypes) {
+      // Strategy: prefix match first (uses index), then substring match (slower)
+      // This avoids full table scans for common cases
+
+      // Step 1: Try prefix match (fast, uses idx_types_name_lower)
       let sql = `
         SELECT t.*, f.path, f.project, f.module, f.language
         FROM types t
         JOIN files f ON t.file_id = f.id
-        WHERE (
-          lower(t.name) LIKE ? OR
-          lower(t.name) LIKE ? OR
-          lower(t.name) LIKE ?
-        )
+        WHERE lower(t.name) LIKE ?
       `;
-      const params = [`${nameLower}%`, `%${nameLower}%`, `%${nameStripped}%`];
+      let params = [`${nameLower}%`];
       if (kind) { sql += ' AND t.kind = ?'; params.push(kind); }
       if (project) { sql += ' AND f.project = ?'; params.push(project); }
       if (language && language !== 'all' && language !== 'blueprint') {
@@ -597,6 +701,76 @@ export class IndexDatabase {
       sql += ' LIMIT ?';
       params.push(maxResults * 3);
       candidates.push(...this.db.prepare(sql).all(...params));
+
+      // Step 2: If not enough results and name is long enough for trigrams, use trigram index
+      let usedTrigramSearch = false;
+      if (candidates.length < maxResults && nameLower.length >= 3) {
+        const trigrams = [...extractTrigrams(nameLower)];
+
+        if (trigrams.length >= 3) {
+          usedTrigramSearch = true;
+          // Use trigram index to find candidates - require 75% match to handle word reordering
+          // (e.g., "PushGameState" vs "GameStatePush" shares ~82% of trigrams)
+          const placeholders = trigrams.map(() => '?').join(',');
+          const minMatch = Math.max(3, Math.ceil(trigrams.length * 0.75));
+          const trigramSql = `
+            SELECT nt.entity_id
+            FROM name_trigrams nt
+            WHERE nt.entity_type = 'type' AND nt.trigram IN (${placeholders})
+            GROUP BY nt.entity_id
+            HAVING COUNT(DISTINCT nt.trigram) >= ?
+          `;
+          const candidateIds = this.db.prepare(trigramSql).all(...trigrams, minMatch).map(r => r.entity_id);
+
+          if (candidateIds.length > 0 && candidateIds.length < 1000) {
+            // Only use trigram results if reasonable number of candidates
+            const existingIds = new Set(candidates.map(c => c.id));
+            const newIds = candidateIds.filter(id => !existingIds.has(id));
+
+            if (newIds.length > 0) {
+              const idPlaceholders = newIds.map(() => '?').join(',');
+              let trigramTypeSql = `
+                SELECT t.*, f.path, f.project, f.module, f.language
+                FROM types t
+                JOIN files f ON t.file_id = f.id
+                WHERE t.id IN (${idPlaceholders})
+              `;
+              const trigramParams = [...newIds];
+              if (kind) { trigramTypeSql += ' AND t.kind = ?'; trigramParams.push(kind); }
+              if (project) { trigramTypeSql += ' AND f.project = ?'; trigramParams.push(project); }
+              if (language && language !== 'all' && language !== 'blueprint') {
+                trigramTypeSql += ' AND f.language = ?'; trigramParams.push(language);
+              }
+              trigramTypeSql += ' LIMIT ?';
+              trigramParams.push(maxResults * 2);
+              candidates.push(...this.db.prepare(trigramTypeSql).all(...trigramParams));
+            }
+          }
+        }
+      }
+
+      // Step 3: Fall back to substring LIKE only if trigram search wasn't used (short search terms)
+      // Skip this if trigram search ran - trigrams are complete (if name contains search term, trigrams match)
+      if (!usedTrigramSearch && candidates.length < maxResults) {
+        const existingIds = new Set(candidates.map(c => c.id));
+        const notInClause = existingIds.size > 0 ? [...existingIds].map(() => '?').join(',') : '-1';
+        let substringsSql = `
+          SELECT t.*, f.path, f.project, f.module, f.language
+          FROM types t
+          JOIN files f ON t.file_id = f.id
+          WHERE lower(t.name) LIKE ? AND t.id NOT IN (${notInClause})
+        `;
+        const substringParams = [`%${nameLower}%`, ...(existingIds.size > 0 ? [...existingIds] : [])];
+        if (kind) { substringsSql += ' AND t.kind = ?'; substringParams.push(kind); }
+        if (project) { substringsSql += ' AND f.project = ?'; substringParams.push(project); }
+        if (language && language !== 'all' && language !== 'blueprint') {
+          substringsSql += ' AND f.language = ?'; substringParams.push(language);
+        }
+        substringsSql += ' LIMIT ?';
+        substringParams.push(maxResults * 2);
+        candidates.push(...this.db.prepare(substringsSql).all(...substringParams));
+      }
+
     }
 
     if (includeBlueprints) {
@@ -613,6 +787,9 @@ export class IndexDatabase {
       candidates.push(...this.db.prepare(assetSql).all(...assetParams));
     }
 
+    // Split search term into camelCase words for word-level matching
+    const searchWords = name.replace(/^[UAFESI](?=[A-Z])/, '').split(/(?=[A-Z])/).map(w => w.toLowerCase()).filter(w => w.length > 0);
+
     const scored = candidates.map(row => {
       const candidateLower = row.name.toLowerCase();
       const candidateStripped = row.name.replace(/^[UAFESI]/, '').toLowerCase();
@@ -624,13 +801,24 @@ export class IndexDatabase {
       else if (candidateStripped.startsWith(nameStripped)) score = 0.93;
       else if (candidateLower.includes(nameLower)) score = 0.85;
       else if (candidateStripped.includes(nameStripped)) score = 0.80;
-      else score = 0.5;
+      else if (searchWords.length >= 2) {
+        // Word-level match: check how many search words appear in the candidate
+        const matchedWords = searchWords.filter(w => candidateLower.includes(w));
+        const wordRatio = matchedWords.length / searchWords.length;
+        if (wordRatio === 1) score = 0.7;       // all words match (different order)
+        else if (wordRatio >= 0.66) score = 0.5; // most words match
+        else score = 0.3;                         // few words match (likely false positive)
+      } else {
+        score = 0.3; // trigram match but no substring/word match
+      }
 
       return { ...row, score };
     });
 
-    scored.sort((a, b) => b.score - a.score);
-    return dedupTypes(scored).slice(0, maxResults);
+    // Filter out low-quality trigram matches
+    const filtered = scored.filter(r => r.score >= 0.4);
+    filtered.sort((a, b) => b.score - a.score);
+    return dedupTypes(filtered).slice(0, maxResults);
   }
 
   findChildrenOf(parentClass, options = {}) {
@@ -1314,6 +1502,87 @@ export class IndexDatabase {
     return count;
   }
 
+  // --- Name Trigram Index Methods ---
+
+  isNameTrigramIndexReady() {
+    return !this.getMetadata('nameTrigramBuildNeeded');
+  }
+
+  getNameTrigramStats() {
+    // Use cached counts from metadata table to avoid expensive COUNT on WITHOUT ROWID table
+    const typeCount = this.getMetadata('nameTrigramTypeCount') || 0;
+    const memberCount = this.getMetadata('nameTrigramMemberCount') || 0;
+    const totalRows = this.getMetadata('nameTrigramTotalRows') || 0;
+    return { typeCount, memberCount, totalRows, ready: this.isNameTrigramIndexReady() };
+  }
+
+  buildNameTrigramIndex(progressCallback = null) {
+    const BATCH_SIZE = 1000;
+
+    // Build trigrams for types
+    const totalTypes = this.db.prepare('SELECT COUNT(*) as count FROM types').get().count;
+    let processedTypes = 0;
+
+    const trigramStmt = this.db.prepare(`
+      INSERT OR IGNORE INTO name_trigrams (trigram, entity_type, entity_id)
+      VALUES (?, ?, ?)
+    `);
+
+    // Process types in batches
+    let offset = 0;
+    while (offset < totalTypes) {
+      const types = this.db.prepare(`SELECT id, name FROM types LIMIT ? OFFSET ?`).all(BATCH_SIZE, offset);
+      if (types.length === 0) break;
+
+      this.db.transaction(() => {
+        for (const type of types) {
+          const trigrams = extractTrigrams(type.name);
+          for (const tri of trigrams) {
+            trigramStmt.run(tri, 'type', type.id);
+          }
+        }
+      })();
+
+      processedTypes += types.length;
+      offset += BATCH_SIZE;
+      if (progressCallback) progressCallback('type', processedTypes, totalTypes);
+    }
+
+    // Build trigrams for members
+    const totalMembers = this.db.prepare('SELECT COUNT(*) as count FROM members').get().count;
+    let processedMembers = 0;
+
+    offset = 0;
+    while (offset < totalMembers) {
+      const members = this.db.prepare(`SELECT id, name FROM members LIMIT ? OFFSET ?`).all(BATCH_SIZE, offset);
+      if (members.length === 0) break;
+
+      this.db.transaction(() => {
+        for (const member of members) {
+          const trigrams = extractTrigrams(member.name);
+          for (const tri of trigrams) {
+            trigramStmt.run(tri, 'member', member.id);
+          }
+        }
+      })();
+
+      processedMembers += members.length;
+      offset += BATCH_SIZE;
+      if (progressCallback) progressCallback('member', processedMembers, totalMembers);
+    }
+
+    // Cache counts in metadata to avoid expensive COUNT queries on WITHOUT ROWID table
+    this.setMetadata('nameTrigramTypeCount', processedTypes);
+    this.setMetadata('nameTrigramMemberCount', processedMembers);
+    const totalRows = this.db.prepare('SELECT COUNT(*) as count FROM name_trigrams').get().count;
+    this.setMetadata('nameTrigramTotalRows', totalRows);
+
+    // Mark index as ready
+    this.setMetadata('nameTrigramBuildNeeded', false);
+
+    return { types: processedTypes, members: processedMembers };
+  }
+
   getFilesWithoutContent() {
     return this.db.prepare(`
       SELECT f.id, f.path, f.project, f.language
@@ -1322,9 +1591,82 @@ export class IndexDatabase {
       WHERE fc.file_id IS NULL AND f.language NOT IN ('content', 'config')
     `).all();
   }
+
+  // --- Query Analytics Methods ---
+
+  _logSlowQuery(method, args, durationMs, resultCount = null) {
+    try {
+      const argsJson = JSON.stringify(args.map(a =>
+        typeof a === 'string' ? a :
+        Array.isArray(a) ? `[${a.length} items]` :
+        typeof a === 'object' ? '{...}' : a
+      ));
+      this.db.prepare(`
+        INSERT INTO query_analytics (timestamp, method, args, duration_ms, result_count)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(new Date().toISOString(), method, argsJson, durationMs, resultCount);
+    } catch (err) {
+      // Don't let analytics logging break queries
+      console.error('[QueryAnalytics] Error logging slow query:', err.message);
+    }
+  }
+
+  getQueryAnalytics(options = {}) {
+    const { method = null, minDurationMs = null, limit = 100, since = null } = options;
+
+    let sql = 'SELECT * FROM query_analytics WHERE 1=1';
+    const params = [];
+
+    if (method) {
+      sql += ' AND method = ?';
+      params.push(method);
+    }
+    if (minDurationMs) {
+      sql += ' AND duration_ms >= ?';
+      params.push(minDurationMs);
+    }
+    if (since) {
+      sql += ' AND timestamp >= ?';
+      params.push(since);
+    }
+
+    sql += ' ORDER BY timestamp DESC LIMIT ?';
+    params.push(limit);
+
+    return this.db.prepare(sql).all(...params);
+  }
+
+  getQueryAnalyticsSummary() {
+    const byMethod = this.db.prepare(`
+      SELECT method, COUNT(*) as count, AVG(duration_ms) as avg_ms, MAX(duration_ms) as max_ms
+      FROM query_analytics
+      GROUP BY method
+      ORDER BY count DESC
+    `).all();
+
+    const slowest = this.db.prepare(`
+      SELECT method, args, duration_ms, timestamp
+      FROM query_analytics
+      ORDER BY duration_ms DESC
+      LIMIT 10
+    `).all();
+
+    const total = this.db.prepare('SELECT COUNT(*) as count FROM query_analytics').get().count;
+
+    return { total, byMethod, slowest };
+  }
+
+  cleanupOldAnalytics(daysOld = 7) {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - daysOld);
+    const result = this.db.prepare(`
+      DELETE FROM query_analytics WHERE timestamp < ?
+    `).run(cutoff.toISOString());
+    return result.changes;
+  }
 }
 
-// Wrap key methods with slow-query timing
+// Wrap key methods with slow-query timing and analytics logging
 const methodsToTime = [
   'findTypeByName', 'findChildrenOf', 'findMember', 'findFileByName',
   'findAssetByName', 'getStats', 'getAssetStats', 'upsertAssetBatch',
@@ -1339,6 +1681,11 @@ for (const method of methodsToTime) {
     if (ms >= SLOW_QUERY_MS) {
       const arg0 = typeof args[0] === 'string' ? `"${args[0]}"` : Array.isArray(args[0]) ? `[${args[0].length} items]` : '';
       console.log(`[${new Date().toISOString()}] [DB] ${method}(${arg0}) — ${ms.toFixed(1)}ms`);
+
+      // Log to analytics table
+      const resultCount = Array.isArray(result) ? result.length :
+        result?.results ? result.results.length : null;
+      this._logSlowQuery(method, args, ms, resultCount);
     }
     return result;
   };
