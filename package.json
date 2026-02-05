@@ -5,6 +5,7 @@
   "main": "src/service/index.js",
   "type": "module",
   "scripts": {
+    "setup": "node src/setup.js",
     "start": "node src/service/index.js",
     "bridge": "node src/bridge/mcp-bridge.js",
     "legacy": "node src/server.js",

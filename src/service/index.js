@@ -3,7 +3,7 @@
 import { readFile } from 'fs/promises';
 import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
-import { readdirSync, statSync } from 'fs';
+import { readdirSync, statSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import { IndexDatabase } from './database.js';
 import { createApi } from './api.js';
@@ -48,8 +48,54 @@ class UnrealIndexService {
 
   async loadConfig() {
     const configPath = join(__dirname, '..', '..', 'config.json');
-    const configContent = await readFile(configPath, 'utf-8');
-    this.config = JSON.parse(configContent);
+
+    if (!existsSync(configPath)) {
+      throw new Error(
+        `config.json not found at ${configPath}\n` +
+        `Run setup.bat or: npm run setup`
+      );
+    }
+
+    let configContent;
+    try {
+      configContent = await readFile(configPath, 'utf-8');
+    } catch (err) {
+      throw new Error(`Cannot read config.json: ${err.message}`);
+    }
+
+    try {
+      this.config = JSON.parse(configContent);
+    } catch (err) {
+      throw new Error(`Invalid JSON in config.json: ${err.message}\nRun setup.bat to regenerate.`);
+    }
+
+    // Validate projects
+    if (!this.config.projects || !Array.isArray(this.config.projects) || this.config.projects.length === 0) {
+      throw new Error(
+        `config.json has no projects configured.\n` +
+        `Run setup.bat or: npm run setup`
+      );
+    }
+
+    // Validate and warn about project paths
+    for (const project of this.config.projects) {
+      if (!project.name) {
+        console.warn(`WARNING: Project missing "name" field, skipping.`);
+        continue;
+      }
+      if (!project.paths || project.paths.length === 0) {
+        console.warn(`WARNING: Project "${project.name}" has no paths configured.`);
+        continue;
+      }
+      if (!project.language) {
+        console.warn(`WARNING: Project "${project.name}" has no "language" field. It will default to angelscript.`);
+      }
+      for (const p of project.paths) {
+        if (!existsSync(p)) {
+          console.warn(`WARNING: Path does not exist for "${project.name}": ${p}`);
+        }
+      }
+    }
 
     this.config.service = this.config.service || { port: 3847, host: '127.0.0.1' };
     this.config.watcher = this.config.watcher || { debounceMs: 100 };

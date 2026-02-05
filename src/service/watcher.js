@@ -28,7 +28,7 @@ export class FileWatcher {
     this.watcher = chokidar.watch(watchPaths, {
       ignored: [
         /(^|[\/\\])\../,
-        ...this.config.exclude.map(p => new RegExp(p.replace(/\*\*/g, '.*').replace(/\*/g, '[^/\\\\]*')))
+        ...(this.config.exclude || []).map(p => new RegExp(p.replace(/\*\*/g, '.*').replace(/\*/g, '[^/\\\\]*')))
       ],
       persistent: true,
       ignoreInitial: true,
