@@ -2,6 +2,7 @@ import express from 'express';
 import { Worker } from 'worker_threads';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { inflateSync } from 'zlib';
 import { patternToTrigrams } from './trigram.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -56,14 +57,34 @@ export function createApi(database, indexer) {
     }
   });
 
-  app.get('/stats', (req, res) => {
+  // Stats cache — refreshed on a timer, never blocks request handling
+  let statsCache = null;
+
+  function refreshStatsCache() {
     try {
       const stats = database.getStats();
       const lastBuild = database.getMetadata('lastBuild');
       const indexStatus = database.getAllIndexStatus();
       const trigramStats = database.getTrigramStats();
       const trigramReady = database.isTrigramIndexReady();
-      res.json({ ...stats, lastBuild, indexStatus, trigram: trigramStats ? { ...trigramStats, ready: trigramReady } : null });
+      statsCache = { ...stats, lastBuild, indexStatus, trigram: trigramStats ? { ...trigramStats, ready: trigramReady } : null };
+    } catch (err) {
+      console.error('[Stats] cache refresh failed:', err.message);
+    }
+  }
+
+  // Refresh stats every 30 seconds in the background
+  refreshStatsCache();
+  setInterval(refreshStatsCache, 30000);
+
+  app.get('/stats', (req, res) => {
+    if (statsCache) {
+      return res.json(statsCache);
+    }
+    // Fallback: compute on demand if cache hasn't been populated yet
+    try {
+      refreshStatsCache();
+      res.json(statsCache);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -301,6 +322,53 @@ export function createApi(database, indexer) {
 
   const GREP_TIMEOUT_MS = 30000;
 
+  // Inline grep matching for trigram candidates (avoids worker thread overhead)
+  function grepCandidates(candidates, regex, maxResults, contextLines) {
+    const results = [];
+    let totalMatches = 0;
+    let filesSearched = 0;
+
+    for (const entry of candidates) {
+      if (results.length >= maxResults) break;
+      filesSearched++;
+
+      let content;
+      try {
+        content = inflateSync(entry.content).toString('utf-8');
+      } catch {
+        continue;
+      }
+
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const match = regex.exec(lines[i]);
+        if (!match) continue;
+
+        totalMatches++;
+        if (results.length < maxResults) {
+          const ctxStart = Math.max(0, i - contextLines);
+          const ctxEnd = Math.min(lines.length - 1, i + contextLines);
+          const context = [];
+          for (let c = ctxStart; c <= ctxEnd; c++) {
+            context.push(lines[c]);
+          }
+          results.push({
+            file: entry.path,
+            project: entry.project,
+            language: entry.language,
+            line: i + 1,
+            column: match.index + 1,
+            match: lines[i],
+            context
+          });
+        }
+        if (results.length >= maxResults) break;
+      }
+    }
+
+    return { results, totalMatches, filesSearched };
+  }
+
   app.get('/grep', (req, res) => {
     const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl } = req.query;
 
@@ -312,76 +380,48 @@ export function createApi(database, indexer) {
     const maxResults = parseInt(mr, 10) || 50;
     const contextLines = parseInt(cl, 10) || 2;
 
-    // Validate regex before spawning worker
+    let regex;
     try {
-      new RegExp(pattern, caseSensitive ? '' : 'i');
+      regex = new RegExp(pattern, caseSensitive ? '' : 'i');
     } catch (e) {
       return res.status(400).json({ error: `Invalid regex: ${e.message}` });
     }
 
-    const workerPath = join(__dirname, 'grep-worker.js');
-    let worker;
+    if (project && !database.projectExists(project)) {
+      return res.status(400).json({ error: `Unknown project: ${project}` });
+    }
+
     const useTrigramIndex = database.isTrigramIndexReady();
 
     if (useTrigramIndex) {
-      // Trigram path: query candidates from the index (no disk I/O)
       const trigrams = patternToTrigrams(pattern, true);
       const candidates = database.queryTrigramCandidates(trigrams, {
         project: project || null,
         language: (language && language !== 'all') ? language : null
       });
 
-      if (project && candidates.length === 0 && trigrams.length > 0) {
-        // Check if the project exists at all
-        const allFiles = database.getAllFiles();
-        if (!allFiles.some(f => f.project === project)) {
-          return res.status(400).json({ error: `Unknown project: ${project}` });
-        }
+      if (candidates !== null) {
+        // Fast path: decompress and match inline (avoids 9s worker thread startup in large processes)
+        const result = grepCandidates(candidates, regex, maxResults, contextLines);
+        return res.json({
+          results: result.results,
+          totalMatches: result.totalMatches,
+          truncated: result.results.length < result.totalMatches,
+          timedOut: false,
+          filesSearched: result.filesSearched
+        });
       }
-
-      worker = new Worker(workerPath, {
-        workerData: {
-          candidates: candidates.map(c => ({
-            content: c.content,
-            path: c.path,
-            project: c.project,
-            language: c.language
-          })),
-          pattern,
-          flags: caseSensitive ? '' : 'i',
-          maxResults,
-          contextLines,
-          literals: null // trigram index already filtered candidates
-        }
-      });
-    } else {
-      // Fallback: read files from disk (trigram index not ready)
-      let dbFiles = database.getAllFiles();
-      if (project) {
-        dbFiles = dbFiles.filter(f => f.project === project);
-        if (dbFiles.length === 0) {
-          return res.status(400).json({ error: `Unknown project: ${project}` });
-        }
-      }
-      if (language && language !== 'all') {
-        dbFiles = dbFiles.filter(f => f.language === language);
-      }
-      dbFiles = dbFiles.filter(f => f.language !== 'content');
-
-      const files = dbFiles.map(f => ({ filePath: f.path, project: f.project, language: f.language }));
-      const literals = extractLiterals(pattern);
-
-      worker = new Worker(workerPath, {
-        workerData: {
-          files,
-          pattern,
-          flags: caseSensitive ? '' : 'i',
-          maxResults,
-          contextLines,
-          literals
-        }
-      });
     }
+
+    // Fallback: read files from disk via worker (trigram index not ready or unindexable pattern)
+    const workerPath = join(__dirname, 'grep-worker.js');
+    const dbFiles = database.getFilteredFiles(project || null, language || null);
+    const files = dbFiles.map(f => ({ filePath: f.path, project: f.project, language: f.language }));
+    const literals = extractLiterals(pattern);
+
+    const worker = new Worker(workerPath, {
+      workerData: { files, pattern, flags: caseSensitive ? '' : 'i', maxResults, contextLines, literals }
+    });
 
     const timeoutId = setTimeout(() => {
       worker.postMessage('abort');
@@ -389,7 +429,6 @@ export function createApi(database, indexer) {
 
     let responded = false;
 
-    // Abort worker if client disconnects
     res.on('close', () => {
       if (!responded) {
         worker.postMessage('abort');

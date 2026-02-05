@@ -182,6 +182,15 @@ class UnrealIndexService {
       });
     }
 
+    // Seed trigram count caches if missing (one-time migration)
+    if (this.database.hasTrigramTables() &&
+        (this.database.getMetadata('trigramCount') === null || this.database.getMetadata('trigramFileCount') === null)) {
+      console.log('[Startup] Calculating trigram counts (one-time)...');
+      const t2 = performance.now();
+      this.database.recalculateTrigramCount();
+      console.log(`[Startup] trigram counts cached: ${(performance.now() - t2).toFixed(0)}ms`);
+    }
+
     this.printIndexSummary();
 
     // Build trigram index for files that don't have it yet (migration path)
@@ -466,9 +475,11 @@ class UnrealIndexService {
     }
 
     this.database.setMetadata('trigramBuildNeeded', false);
+    // Recalculate exact trigram count after full build
+    const exactCount = this.database.recalculateTrigramCount();
     const totalTime = ((performance.now() - buildStart) / 1000).toFixed(1);
     const stats = this.database.getTrigramStats();
-    console.log(`[Trigram] Build complete in ${totalTime}s: ${stats.filesWithContent} files, ${stats.trigramRows} trigram entries`);
+    console.log(`[Trigram] Build complete in ${totalTime}s: ${stats.filesWithContent} files, ${exactCount} trigram entries`);
   }
 
   printIndexSummary() {

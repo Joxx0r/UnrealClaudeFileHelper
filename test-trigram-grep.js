@@ -215,12 +215,12 @@ await test('grep worker case-insensitive', async () => {
   assert(result.results.length > 0, 'Case-insensitive search should find matches');
 });
 
-await test('unindexable pattern falls back to all files', async () => {
+await test('unindexable pattern returns null (signals disk fallback)', async () => {
   const trigrams = patternToTrigrams('.*', true);
   assert(trigrams.length === 0, 'Should be unindexable');
 
   const candidates = db.queryTrigramCandidates(trigrams, {});
-  assert(candidates.length === 3, `Should return all 3 files, got ${candidates.length}`);
+  assert(candidates === null, `Should return null for unindexable pattern, got ${candidates}`);
 });
 
 await test('project filter works with trigram query', async () => {

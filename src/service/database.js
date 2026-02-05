@@ -262,6 +262,18 @@ export class IndexDatabase {
     return this.db.prepare('SELECT * FROM files').all();
   }
 
+  projectExists(project) {
+    return !!this.db.prepare('SELECT 1 FROM files WHERE project = ? LIMIT 1').get(project);
+  }
+
+  getFilteredFiles(project, language) {
+    let sql = 'SELECT * FROM files WHERE language != ?';
+    const params = ['content'];
+    if (project) { sql += ' AND project = ?'; params.push(project); }
+    if (language && language !== 'all') { sql += ' AND language = ?'; params.push(language); }
+    return this.db.prepare(sql).all(...params);
+  }
+
   upsertFile(path, project, module, mtime, language = 'angelscript') {
     const stmt = this.db.prepare(`
       INSERT INTO files (path, project, module, mtime, language)
@@ -277,19 +289,12 @@ export class IndexDatabase {
   }
 
   deleteFile(path) {
-    const file = this.getFileByPath(path);
-    if (file) {
-      this.db.prepare('DELETE FROM members WHERE file_id = ?').run(file.id);
-      this.db.prepare('DELETE FROM types WHERE file_id = ?').run(file.id);
-      this.db.prepare('DELETE FROM files WHERE id = ?').run(file.id);
-      return true;
-    }
-    return false;
+    // CASCADE handles members, types, file_content, and trigrams
+    return this.db.prepare('DELETE FROM files WHERE path = ?').run(path).changes > 0;
   }
 
   deleteFileById(fileId) {
-    this.db.prepare('DELETE FROM members WHERE file_id = ?').run(fileId);
-    this.db.prepare('DELETE FROM types WHERE file_id = ?').run(fileId);
+    // CASCADE handles members, types, file_content, and trigrams
     this.db.prepare('DELETE FROM files WHERE id = ?').run(fileId);
   }
 
@@ -846,29 +851,26 @@ export class IndexDatabase {
   getStats() {
     const totalFiles = this.db.prepare('SELECT COUNT(*) as count FROM files').get().count;
     const totalTypes = this.db.prepare('SELECT COUNT(*) as count FROM types').get().count;
+    const totalMembers = this.db.prepare('SELECT COUNT(*) as count FROM members').get().count;
 
     const kindCounts = this.db.prepare(`
       SELECT kind, COUNT(*) as count FROM types GROUP BY kind
     `).all();
 
-    const projectCounts = this.db.prepare(`
-      SELECT f.project, f.language, COUNT(DISTINCT f.id) as files, COUNT(t.id) as types
-      FROM files f
-      LEFT JOIN types t ON f.id = t.file_id
-      GROUP BY f.project, f.language
-    `).all();
-
-    const languageCounts = this.db.prepare(`
-      SELECT f.language, COUNT(DISTINCT f.id) as files, COUNT(t.id) as types
-      FROM files f
-      LEFT JOIN types t ON f.id = t.file_id
-      GROUP BY f.language
-    `).all();
-
-    const totalMembers = this.db.prepare('SELECT COUNT(*) as count FROM members').get().count;
-
     const memberKindCounts = this.db.prepare(`
       SELECT member_kind, COUNT(*) as count FROM members GROUP BY member_kind
+    `).all();
+
+    // File counts per project/language (no JOIN needed)
+    const fileCounts = this.db.prepare(`
+      SELECT project, language, COUNT(*) as files FROM files GROUP BY project, language
+    `).all();
+
+    // Type counts per project/language (no JOIN needed)
+    const typeCounts = this.db.prepare(`
+      SELECT f.project, f.language, COUNT(*) as types
+      FROM types t JOIN files f ON t.file_id = f.id
+      GROUP BY f.project, f.language
     `).all();
 
     const stats = {
@@ -889,16 +891,32 @@ export class IndexDatabase {
       stats.byMemberKind[row.member_kind] = row.count;
     }
 
-    for (const row of languageCounts) {
-      stats.byLanguage[row.language] = { files: row.files, types: row.types };
-    }
-
-    for (const row of projectCounts) {
+    // Build projects map from file counts
+    for (const row of fileCounts) {
       if (!stats.projects[row.project]) {
         stats.projects[row.project] = { files: 0, types: 0, language: row.language };
       }
       stats.projects[row.project].files += row.files;
-      stats.projects[row.project].types += row.types;
+    }
+
+    // Add type counts to projects
+    for (const row of typeCounts) {
+      if (stats.projects[row.project]) {
+        stats.projects[row.project].types += row.types;
+      }
+    }
+
+    // Derive language counts from project data (no extra query)
+    for (const row of fileCounts) {
+      if (!stats.byLanguage[row.language]) {
+        stats.byLanguage[row.language] = { files: 0, types: 0 };
+      }
+      stats.byLanguage[row.language].files += row.files;
+    }
+    for (const row of typeCounts) {
+      if (stats.byLanguage[row.language]) {
+        stats.byLanguage[row.language].types += row.types;
+      }
     }
 
     return stats;
@@ -925,11 +943,11 @@ export class IndexDatabase {
   }
 
   isEmpty() {
-    return this.db.prepare('SELECT COUNT(*) as count FROM files').get().count === 0;
+    return !this.db.prepare('SELECT 1 FROM files LIMIT 1').get();
   }
 
   isLanguageEmpty(language) {
-    return this.db.prepare('SELECT COUNT(*) as count FROM files WHERE language = ?').get(language).count === 0;
+    return !this.db.prepare('SELECT 1 FROM files WHERE language = ? LIMIT 1').get(language);
   }
 
   setIndexStatus(language, status, progressCurrent = 0, progressTotal = 0, errorMessage = null) {
@@ -958,7 +976,7 @@ export class IndexDatabase {
   }
 
   clearLanguage(language) {
-    this.db.exec(`DELETE FROM files WHERE language = '${language}'`);
+    this.db.prepare('DELETE FROM files WHERE language = ?').run(language);
   }
 
   getFilesByLanguage(language) {
@@ -1021,9 +1039,9 @@ export class IndexDatabase {
 
   isAssetIndexEmpty(project) {
     if (project) {
-      return this.db.prepare('SELECT COUNT(*) as count FROM assets WHERE project = ?').get(project).count === 0;
+      return !this.db.prepare('SELECT 1 FROM assets WHERE project = ? LIMIT 1').get(project);
     }
-    return this.db.prepare('SELECT COUNT(*) as count FROM assets').get().count === 0;
+    return !this.db.prepare('SELECT 1 FROM assets LIMIT 1').get();
   }
 
   findAssetByName(name, options = {}) {
@@ -1153,6 +1171,7 @@ export class IndexDatabase {
   // --- Trigram index methods ---
 
   upsertFileContent(fileId, compressedContent, hash) {
+    const existing = this.db.prepare('SELECT 1 FROM file_content WHERE file_id = ?').get(fileId);
     this.db.prepare(`
       INSERT INTO file_content (file_id, content, content_hash)
       VALUES (?, ?, ?)
@@ -1160,6 +1179,9 @@ export class IndexDatabase {
         content = excluded.content,
         content_hash = excluded.content_hash
     `).run(fileId, compressedContent, hash);
+    if (!existing) {
+      this._adjustTrigramFileCount(1);
+    }
   }
 
   getFileContent(fileId) {
@@ -1180,19 +1202,28 @@ export class IndexDatabase {
   }
 
   clearTrigramsForFile(fileId) {
-    this.db.prepare('DELETE FROM trigrams WHERE file_id = ?').run(fileId);
+    const count = this.db.prepare('SELECT COUNT(*) as count FROM trigrams WHERE file_id = ?').get(fileId).count;
+    if (count > 0) {
+      this.db.prepare('DELETE FROM trigrams WHERE file_id = ?').run(fileId);
+      this._adjustTrigramCount(-count);
+    }
   }
 
   insertTrigrams(fileId, trigrams) {
     const stmt = this.db.prepare(
       'INSERT OR IGNORE INTO trigrams (trigram, file_id) VALUES (?, ?)'
     );
+    let inserted = 0;
     const insertMany = this.db.transaction((items) => {
       for (const tri of items) {
-        stmt.run(tri, fileId);
+        const result = stmt.run(tri, fileId);
+        inserted += result.changes;
       }
     });
     insertMany(trigrams);
+    if (inserted > 0) {
+      this._adjustTrigramCount(inserted);
+    }
   }
 
   /**
@@ -1202,17 +1233,8 @@ export class IndexDatabase {
    */
   queryTrigramCandidates(trigrams, { project, language } = {}) {
     if (trigrams.length === 0) {
-      // Unindexable query — return all file content matching filters
-      let sql = `
-        SELECT fc.file_id, fc.content, f.path, f.project, f.language
-        FROM file_content fc
-        JOIN files f ON f.id = fc.file_id
-        WHERE f.language != 'content'
-      `;
-      const params = [];
-      if (project) { sql += ' AND f.project = ?'; params.push(project); }
-      if (language && language !== 'all') { sql += ' AND f.language = ?'; params.push(language); }
-      return this.db.prepare(sql).all(...params);
+      // Unindexable query — signal caller to fall back to disk-based grep
+      return null;
     }
 
     const placeholders = trigrams.map(() => '?').join(',');
@@ -1239,16 +1261,36 @@ export class IndexDatabase {
   }
 
   hasTrigramTables() {
-    return this.db.prepare(`
+    if (this._hasTrigramTables !== undefined) return this._hasTrigramTables;
+    this._hasTrigramTables = this.db.prepare(`
       SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='file_content'
     `).get().count > 0;
+    return this._hasTrigramTables;
   }
 
   getTrigramStats() {
     if (!this.hasTrigramTables()) return null;
-    const fileCount = this.db.prepare('SELECT COUNT(*) as count FROM file_content').get().count;
-    const trigramCount = this.db.prepare('SELECT COUNT(*) as count FROM trigrams').get().count;
+    const fileCount = this.getMetadata('trigramFileCount') || 0;
+    const trigramCount = this.getMetadata('trigramCount') || 0;
     return { filesWithContent: fileCount, trigramRows: trigramCount };
+  }
+
+  _adjustTrigramCount(delta) {
+    const current = this.getMetadata('trigramCount') || 0;
+    this.setMetadata('trigramCount', current + delta);
+  }
+
+  _adjustTrigramFileCount(delta) {
+    const current = this.getMetadata('trigramFileCount') || 0;
+    this.setMetadata('trigramFileCount', current + delta);
+  }
+
+  recalculateTrigramCount() {
+    const count = this.db.prepare('SELECT COUNT(*) as count FROM trigrams').get().count;
+    const fileCount = this.db.prepare('SELECT COUNT(*) as count FROM file_content').get().count;
+    this.setMetadata('trigramCount', count);
+    this.setMetadata('trigramFileCount', fileCount);
+    return count;
   }
 
   getFilesWithoutContent() {

@@ -97,9 +97,9 @@ test('queryTrigramCandidates returns no candidates for non-matching trigrams', (
   assert(candidates.length === 0, `Expected 0, got ${candidates.length}`);
 });
 
-test('queryTrigramCandidates with empty trigrams returns all files', () => {
+test('queryTrigramCandidates with empty trigrams returns null (fallback signal)', () => {
   const candidates = db.queryTrigramCandidates([], {});
-  assert(candidates.length === 1, `Expected 1, got ${candidates.length}`);
+  assert(candidates === null, `Expected null, got ${candidates}`);
 });
 
 // Insert a second file
