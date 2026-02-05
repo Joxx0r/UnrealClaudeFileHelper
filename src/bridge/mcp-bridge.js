@@ -294,7 +294,7 @@ class UnrealIndexBridge {
           },
           {
             name: 'unreal_grep',
-            description: 'Search file contents for a pattern (regex or literal string). Scoped to indexed projects. Use for finding usages, string references, variable assignments, or any content pattern that structural type/member lookups cannot find.',
+            description: 'Search file contents for a pattern (regex or literal string). Also searches asset names and paths (maps, blueprints, materials, etc.) and returns matches in a separate "assets" section. Scoped to indexed projects. Use for finding usages, string references, variable assignments, asset names, or any content pattern that structural type/member lookups cannot find.',
             inputSchema: {
               type: 'object',
               properties: {

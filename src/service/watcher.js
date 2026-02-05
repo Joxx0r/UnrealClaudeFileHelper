@@ -217,6 +217,7 @@ export class FileWatcher {
   _writeToDatabase(result) {
     if (result.type === 'asset') {
       this.database.upsertAssetBatch([result.data]);
+      this.database.indexAssetContent([result.data]);
       return;
     }
 

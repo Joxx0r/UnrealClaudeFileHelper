@@ -501,22 +501,35 @@ export function createApi(database, indexer, queryPool = null) {
         const trigrams = patternToTrigrams(pattern, true);
 
         if (trigrams.length > 0) {
-          // Full grep pipeline offloaded to worker: query + decompress + match
-          const grepOpts = {
+          // Full grep pipeline offloaded to workers: source code + asset search in parallel
+          const sourceOpts = {
             project: project || null,
             language: (language && language !== 'all') ? language : null,
             trigrams
           };
-          const result = await poolQuery('grepInline', [pattern, caseSensitive ? '' : 'i', maxResults, contextLines, grepOpts]);
+          const assetOpts = {
+            project: project || null,
+            language: 'asset',
+            trigrams
+          };
 
-          if (result !== null) {
-            return res.json({
-              results: result.results,
-              totalMatches: result.totalMatches,
-              truncated: result.results.length < result.totalMatches,
+          const [sourceResult, assetResult] = await Promise.all([
+            poolQuery('grepInline', [pattern, caseSensitive ? '' : 'i', maxResults, contextLines, sourceOpts]),
+            poolQuery('grepInline', [pattern, caseSensitive ? '' : 'i', 20, 0, assetOpts])
+          ]);
+
+          if (sourceResult !== null) {
+            const response = {
+              results: sourceResult.results,
+              totalMatches: sourceResult.totalMatches,
+              truncated: sourceResult.results.length < sourceResult.totalMatches,
               timedOut: false,
-              filesSearched: result.filesSearched
-            });
+              filesSearched: sourceResult.filesSearched
+            };
+            if (assetResult && assetResult.results && assetResult.results.length > 0) {
+              response.assets = assetResult.results;
+            }
+            return res.json(response);
           }
         }
       }

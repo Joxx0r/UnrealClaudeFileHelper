@@ -295,6 +295,7 @@ export class BackgroundIndexer {
           });
 
           this.database.upsertAssetBatch(assets);
+          this.database.indexAssetContent(assets);
           totalAssets += batch.length;
           console.log(`[Indexer] asset batch ${i}-${i + batch.length}: ${((performance.now() - batchStart) / 1000).toFixed(1)}s`);
           this.database.setIndexStatus('content', 'indexing', totalAssets, files.length);

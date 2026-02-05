@@ -224,6 +224,9 @@ class UnrealIndexService {
       }
     }
 
+    // Build asset content index if assets exist but haven't been trigram-indexed yet (migration)
+    this.buildAssetContentIfNeeded();
+
     process.on('SIGINT', () => this.shutdown());
     process.on('SIGTERM', () => this.shutdown());
   }
@@ -424,6 +427,26 @@ class UnrealIndexService {
     const parts = relativePath.replace(/\.(as|h|cpp)$/, '').split('/');
     parts.pop();
     return [projectName, ...parts].join('.');
+  }
+
+  buildAssetContentIfNeeded() {
+    const hasAssets = this.database.db.prepare('SELECT 1 FROM assets LIMIT 1').get();
+    const hasAssetFiles = this.database.db.prepare("SELECT 1 FROM files WHERE language = 'asset' LIMIT 1").get();
+    if (hasAssets && !hasAssetFiles) {
+      console.log('[Startup] Building asset content index for grep (one-time migration)...');
+      const t = performance.now();
+      const BATCH_SIZE = 5000;
+      let total = 0;
+      const allAssets = this.database.db.prepare(
+        'SELECT name, content_path as contentPath, folder, project, extension, mtime, asset_class as assetClass, parent_class as parentClass FROM assets'
+      ).all();
+      for (let i = 0; i < allAssets.length; i += BATCH_SIZE) {
+        this.database.indexAssetContent(allAssets.slice(i, i + BATCH_SIZE));
+        total += Math.min(BATCH_SIZE, allAssets.length - i);
+        if (total % 50000 === 0) console.log(`[Startup] asset content: ${total}/${allAssets.length}`);
+      }
+      console.log(`[Startup] Asset content index built: ${total} assets in ${((performance.now() - t) / 1000).toFixed(1)}s`);
+    }
   }
 
   async buildMissingTrigrams() {

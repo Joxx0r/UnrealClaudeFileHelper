@@ -2,8 +2,8 @@ import Database from 'better-sqlite3';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync, existsSync } from 'fs';
-import { inflateSync } from 'zlib';
-import { extractTrigrams } from './trigram.js';
+import { inflateSync, deflateSync } from 'zlib';
+import { extractTrigrams, contentHash } from './trigram.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -82,6 +82,7 @@ export class IndexDatabase {
       CREATE INDEX IF NOT EXISTS idx_types_name_lower ON types(lower(name));
       CREATE INDEX IF NOT EXISTS idx_types_parent ON types(parent);
       CREATE INDEX IF NOT EXISTS idx_types_kind ON types(kind);
+      CREATE INDEX IF NOT EXISTS idx_types_parent_kind ON types(parent, kind);
       CREATE INDEX IF NOT EXISTS idx_files_module ON files(module);
       CREATE INDEX IF NOT EXISTS idx_files_project ON files(project);
       CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
@@ -122,6 +123,7 @@ export class IndexDatabase {
       CREATE INDEX IF NOT EXISTS idx_assets_folder ON assets(folder);
       CREATE INDEX IF NOT EXISTS idx_assets_project ON assets(project);
       CREATE INDEX IF NOT EXISTS idx_assets_content_path ON assets(content_path);
+      CREATE INDEX IF NOT EXISTS idx_assets_parent_class ON assets(parent_class);
 
       CREATE TABLE IF NOT EXISTS metadata (
         key TEXT PRIMARY KEY,
@@ -320,8 +322,8 @@ export class IndexDatabase {
   }
 
   getFilteredFiles(project, language) {
-    let sql = 'SELECT * FROM files WHERE language != ?';
-    const params = ['content'];
+    let sql = "SELECT * FROM files WHERE language NOT IN ('content', 'asset')";
+    const params = [];
     if (project) { sql += ' AND project = ?'; params.push(project); }
     if (language && language !== 'all') { sql += ' AND language = ?'; params.push(language); }
     return this.db.prepare(sql).all(...params);
@@ -563,7 +565,7 @@ export class IndexDatabase {
     const { project = null, language = null, depth = 1 } = options;
 
     // Use GROUP BY at SQL level for efficiency (avoids fetching all rows)
-    let sql = 'SELECT module, COUNT(*) as file_count FROM files WHERE 1=1';
+    let sql = "SELECT module, COUNT(*) as file_count FROM files WHERE language != 'asset'";
     const params = [];
 
     if (parent) {
@@ -631,31 +633,39 @@ export class IndexDatabase {
         results = this.db.prepare(sql).all(...params);
 
         if (results.length === 0) {
-          // Strategy 1: Try adding each UE prefix to the original name
-          // Handles: "EmbarkGameMode" → finds "AEmbarkGameMode"
+          // Batch prefix fallback: try all UE prefix variants in a single query
+          // Strategy 1: Add each prefix (EmbarkGameMode → AEmbarkGameMode)
+          // Strategy 2: Swap prefix (UMyActor → AMyActor)
+          const candidates = new Set();
           for (const prefix of ['A', 'U', 'F', 'E', 'S', 'I']) {
             const tryName = prefix + name;
-            if (tryName !== name) {
-              params[0] = tryName;
-              results = this.db.prepare(sql).all(...params);
-              if (results.length > 0) break;
+            if (tryName !== name) candidates.add(tryName);
+          }
+          const nameWithoutPrefix = name.replace(/^[UAFESI]/, '');
+          if (nameWithoutPrefix !== name) {
+            for (const prefix of ['A', 'U', 'F', 'E', 'S', 'I', '']) {
+              const tryName = prefix + nameWithoutPrefix;
+              if (tryName !== name) candidates.add(tryName);
             }
           }
 
-          // Strategy 2: Strip existing prefix and try alternatives
-          // Handles: "UMyActor" → finds "AMyActor"
-          if (results.length === 0) {
-            const nameWithoutPrefix = name.replace(/^[UAFESI]/, '');
-            if (nameWithoutPrefix !== name) {
-              for (const prefix of ['A', 'U', 'F', 'E', 'S', 'I', '']) {
-                const tryName = prefix + nameWithoutPrefix;
-                if (tryName !== name) {
-                  params[0] = tryName;
-                  results = this.db.prepare(sql).all(...params);
-                  if (results.length > 0) break;
-                }
-              }
+          if (candidates.size > 0) {
+            const placeholders = [...candidates].map(() => '?').join(',');
+            let batchSql = `
+              SELECT t.*, f.path, f.project, f.module, f.language
+              FROM types t
+              JOIN files f ON t.file_id = f.id
+              WHERE t.name IN (${placeholders})
+            `;
+            const batchParams = [...candidates];
+            if (kind) { batchSql += ' AND t.kind = ?'; batchParams.push(kind); }
+            if (project) { batchSql += ' AND f.project = ?'; batchParams.push(project); }
+            if (language && language !== 'all' && language !== 'blueprint') {
+              batchSql += ' AND f.language = ?'; batchParams.push(language);
             }
+            batchSql += ' LIMIT ?';
+            batchParams.push(maxResults);
+            results = this.db.prepare(batchSql).all(...batchParams);
           }
         }
       }
@@ -880,33 +890,36 @@ export class IndexDatabase {
 
     // Phase 1: Traverse full inheritance tree WITHOUT project/language filter
     // so cross-project inheritance chains are followed completely
+    // Uses level-at-a-time BFS: query all parents in current frontier with WHERE IN (...)
     const children = new Set();
-    const queue = [parentClass];
-    const traversalStmt = this.db.prepare(`
-      SELECT t.name FROM types t
-      WHERE t.parent = ? AND t.kind IN ('class', 'struct', 'interface')
-    `);
-    const assetTraversalStmt = this.db.prepare(`
-      SELECT name FROM assets WHERE parent_class = ? AND asset_class IS NOT NULL
-    `);
+    let frontier = [parentClass];
 
-    while (queue.length > 0) {
-      const current = queue.shift();
-      const directChildren = traversalStmt.all(current);
+    while (frontier.length > 0) {
+      const placeholders = frontier.map(() => '?').join(',');
+
+      const directChildren = this.db.prepare(`
+        SELECT t.name FROM types t
+        WHERE t.parent IN (${placeholders}) AND t.kind IN ('class', 'struct', 'interface')
+      `).all(...frontier);
+
+      const assetChildren = this.db.prepare(`
+        SELECT name FROM assets WHERE parent_class IN (${placeholders}) AND asset_class IS NOT NULL
+      `).all(...frontier);
+
+      const nextFrontier = [];
       for (const child of directChildren) {
         if (!children.has(child.name)) {
           children.add(child.name);
-          queue.push(child.name);
+          nextFrontier.push(child.name);
         }
       }
-      // Also check Blueprint assets for children
-      const assetChildren = assetTraversalStmt.all(current);
       for (const child of assetChildren) {
         if (!children.has(child.name)) {
           children.add(child.name);
-          queue.push(child.name);
+          nextFrontier.push(child.name);
         }
       }
+      frontier = nextFrontier;
     }
 
     if (children.size === 0) {
@@ -1012,7 +1025,7 @@ export class IndexDatabase {
           ELSE 0.5
         END + (CASE WHEN lower(f.path) LIKE '%.h' THEN 0.01 ELSE 0 END) as score
       FROM files f
-      WHERE (
+      WHERE f.language != 'asset' AND (
         lower(f.path) LIKE ? OR
         lower(f.path) LIKE ?
       )
@@ -1069,7 +1082,7 @@ export class IndexDatabase {
   }
 
   getStats() {
-    const totalFiles = this.db.prepare('SELECT COUNT(*) as count FROM files').get().count;
+    const totalFiles = this.db.prepare("SELECT COUNT(*) as count FROM files WHERE language != 'asset'").get().count;
     const totalTypes = this.db.prepare('SELECT COUNT(*) as count FROM types').get().count;
     const totalMembers = this.db.prepare('SELECT COUNT(*) as count FROM members').get().count;
 
@@ -1081,9 +1094,9 @@ export class IndexDatabase {
       SELECT member_kind, COUNT(*) as count FROM members GROUP BY member_kind
     `).all();
 
-    // File counts per project/language (no JOIN needed)
+    // File counts per project/language (no JOIN needed, exclude synthetic asset entries)
     const fileCounts = this.db.prepare(`
-      SELECT project, language, COUNT(*) as files FROM files GROUP BY project, language
+      SELECT project, language, COUNT(*) as files FROM files WHERE language != 'asset' GROUP BY project, language
     `).all();
 
     // Type counts per project/language (no JOIN needed)
@@ -1246,13 +1259,57 @@ export class IndexDatabase {
   }
 
   deleteAsset(path) {
-    return this.db.prepare('DELETE FROM assets WHERE path = ?').run(path).changes > 0;
+    const asset = this.db.prepare('SELECT content_path FROM assets WHERE path = ?').get(path);
+    const deleted = this.db.prepare('DELETE FROM assets WHERE path = ?').run(path).changes > 0;
+    if (deleted && asset) {
+      this.deleteAssetContent(asset.content_path);
+    }
+    return deleted;
+  }
+
+  /**
+   * Create synthetic files + file_content + trigrams entries for assets,
+   * so grep can find them via the trigram index.
+   */
+  indexAssetContent(assets) {
+    const upsertFile = this.db.prepare(`
+      INSERT INTO files (path, project, module, language, mtime)
+      VALUES (?, ?, ?, 'asset', ?)
+      ON CONFLICT(path) DO UPDATE SET project=excluded.project, module=excluded.module, mtime=excluded.mtime
+    `);
+    const getFileId = this.db.prepare('SELECT id FROM files WHERE path = ?');
+
+    const insertBatch = this.db.transaction((batch) => {
+      for (const asset of batch) {
+        const content = [asset.name, asset.contentPath, asset.assetClass || '', asset.parentClass || ''].join('\n');
+        const compressed = deflateSync(Buffer.from(content));
+        const hash = contentHash(content);
+
+        upsertFile.run(asset.contentPath, asset.project, asset.folder, asset.mtime);
+        const row = getFileId.get(asset.contentPath);
+        if (!row) continue;
+
+        this.clearTrigramsForFile(row.id);
+        this.upsertFileContent(row.id, compressed, hash);
+        const trigrams = extractTrigrams(content);
+        this.insertTrigrams(row.id, [...trigrams]);
+      }
+    });
+
+    insertBatch(assets);
+  }
+
+  deleteAssetContent(contentPath) {
+    this.db.prepare("DELETE FROM files WHERE path = ? AND language = 'asset'").run(contentPath);
   }
 
   clearAssets(project) {
+    // Also clear synthetic file entries for assets (CASCADE cleans file_content + trigrams)
     if (project) {
+      this.db.prepare("DELETE FROM files WHERE language = 'asset' AND project = ?").run(project);
       this.db.prepare('DELETE FROM assets WHERE project = ?').run(project);
     } else {
+      this.db.prepare("DELETE FROM files WHERE language = 'asset'").run();
       this.db.exec('DELETE FROM assets');
     }
   }
