@@ -1317,7 +1317,7 @@ for (const method of methodsToTime) {
     const ms = performance.now() - start;
     if (ms >= SLOW_QUERY_MS) {
       const arg0 = typeof args[0] === 'string' ? `"${args[0]}"` : Array.isArray(args[0]) ? `[${args[0].length} items]` : '';
-      console.log(`[DB] ${method}(${arg0}) — ${ms.toFixed(1)}ms`);
+      console.log(`[${new Date().toISOString()}] [DB] ${method}(${arg0}) — ${ms.toFixed(1)}ms`);
     }
     return result;
   };

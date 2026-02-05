@@ -19,7 +19,7 @@ export function createApi(database, indexer) {
     res.on('finish', () => {
       const ms = (performance.now() - start).toFixed(1);
       const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-      console.log(`[API] ${req.method} ${req.path}${query} — ${ms}ms (${res.statusCode})`);
+      console.log(`[${new Date().toISOString()}] [API] ${req.method} ${req.path}${query} — ${ms}ms (${res.statusCode})`);
     });
     next();
   });
@@ -69,7 +69,7 @@ export function createApi(database, indexer) {
       const trigramReady = database.isTrigramIndexReady();
       statsCache = { ...stats, lastBuild, indexStatus, trigram: trigramStats ? { ...trigramStats, ready: trigramReady } : null };
     } catch (err) {
-      console.error('[Stats] cache refresh failed:', err.message);
+      console.error(`[${new Date().toISOString()}] [Stats] cache refresh failed:`, err.message);
     }
   }
 
