@@ -4,6 +4,9 @@ on:
   pull_request:
     types: [opened, ready_for_review]
 
+permissions:
+  pull-requests: write
+
 jobs:
   request-claude-review:
     runs-on: ubuntu-latest
