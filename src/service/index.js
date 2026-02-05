@@ -128,7 +128,7 @@ class UnrealIndexService {
 
     // Spawn query worker pool early (before chokidar grows RSS)
     t = performance.now();
-    const workerCount = Math.min(3, Math.max(1, os.cpus().length - 1));
+    const workerCount = Math.min(5, Math.max(1, os.cpus().length - 1));
     this.queryPool = new QueryPool(dbPath, workerCount);
     await this.queryPool.spawn();
     console.log(`[Startup] query pool: ${workerCount} workers (${(performance.now() - t).toFixed(0)}ms)`);

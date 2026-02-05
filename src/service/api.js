@@ -218,14 +218,14 @@ export function createApi(database, indexer, queryPool = null) {
 
   app.get('/summary', (req, res) => {
     try {
-      const stats = database.getStats();
+      const stats = statsCache || database.getStats();
       const lastBuild = database.getMetadata('lastBuild');
-      const indexStatus = database.getAllIndexStatus();
+      const indexStatus = statsCache?.indexStatus || database.getAllIndexStatus();
 
       res.json({
         generatedAt: lastBuild?.timestamp || null,
         stats,
-        projects: Object.keys(stats.projects),
+        projects: Object.keys(stats.projects || {}),
         languages: Object.keys(stats.byLanguage || {}),
         buildTimeMs: lastBuild?.buildTimeMs || null,
         indexStatus
@@ -499,23 +499,25 @@ export function createApi(database, indexer, queryPool = null) {
 
       if (useTrigramIndex) {
         const trigrams = patternToTrigrams(pattern, true);
-        const trigramOpts = {
-          project: project || null,
-          language: (language && language !== 'all') ? language : null
-        };
 
-        const candidates = await poolQuery('queryTrigramCandidates', [trigrams, trigramOpts]);
+        if (trigrams.length > 0) {
+          // Full grep pipeline offloaded to worker: query + decompress + match
+          const grepOpts = {
+            project: project || null,
+            language: (language && language !== 'all') ? language : null,
+            trigrams
+          };
+          const result = await poolQuery('grepInline', [pattern, caseSensitive ? '' : 'i', maxResults, contextLines, grepOpts]);
 
-        if (candidates !== null) {
-          // Fast path: decompress and match inline (avoids 9s worker thread startup in large processes)
-          const result = grepCandidates(candidates, regex, maxResults, contextLines);
-          return res.json({
-            results: result.results,
-            totalMatches: result.totalMatches,
-            truncated: result.results.length < result.totalMatches,
-            timedOut: false,
-            filesSearched: result.filesSearched
-          });
+          if (result !== null) {
+            return res.json({
+              results: result.results,
+              totalMatches: result.totalMatches,
+              truncated: result.results.length < result.totalMatches,
+              timedOut: false,
+              filesSearched: result.filesSearched
+            });
+          }
         }
       }
     } catch (err) {

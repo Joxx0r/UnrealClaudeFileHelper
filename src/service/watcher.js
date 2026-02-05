@@ -102,167 +102,44 @@ export class FileWatcher {
     let changed = 0;
     let deleted = 0;
 
+    // Phase 1: Handle deletes immediately (no I/O needed)
+    const ioTasks = [];
     for (const [filePath, eventType] of updates) {
-      try {
-        const project = this.findProjectForPath(filePath);
-        if (!project && eventType !== 'unlink') continue;
+      const project = this.findProjectForPath(filePath);
+      if (!project && eventType !== 'unlink') continue;
 
-        const language = project?.language || 'angelscript';
+      const language = project?.language || 'angelscript';
 
-        // Handle content/asset file changes separately
+      if (eventType === 'unlink') {
         if (language === 'content') {
-          if (eventType === 'unlink') {
-            const removed = this.database.deleteAsset(filePath);
-            if (removed) deleted++;
-          } else {
-            const basePath = this.findBasePathForFile(filePath, project);
-            if (!basePath) continue;
-
-            const fileStat = await stat(filePath);
-            const mtime = Math.floor(fileStat.mtimeMs);
-            const contentRoot = project.contentRoot || project.paths[0];
-            const relativePath = relative(contentRoot, filePath).replace(/\\/g, '/');
-            const ext = relativePath.match(/\.[^.]+$/)?.[0] || '';
-            const contentPath = '/Game/' + relativePath.replace(/\.[^.]+$/, '');
-            const name = relativePath.split('/').pop().replace(/\.[^.]+$/, '');
-            const folder = '/Game/' + relativePath.split('/').slice(0, -1).join('/');
-
-            let assetClass = null;
-            let parentClass = null;
-            if (ext === '.uasset') {
-              try {
-                const info = parseUAssetHeader(filePath);
-                assetClass = info.assetClass;
-                parentClass = info.parentClass;
-              } catch { /* skip */ }
-            }
-
-            this.database.upsertAssetBatch([{
-              path: filePath,
-              name,
-              contentPath,
-              folder: folder || '/Game',
-              project: project.name,
-              extension: ext,
-              mtime,
-              assetClass,
-              parentClass
-            }]);
-
-            if (eventType === 'add') added++;
-            else changed++;
-          }
-          continue;
-        }
-
-        if (eventType === 'unlink') {
-          const removed = this.database.deleteFile(filePath);
-          if (removed) deleted++;
+          if (this.database.deleteAsset(filePath)) deleted++;
         } else {
-          const basePath = this.findBasePathForFile(filePath, project);
-          if (!basePath) continue;
-
-          const fileStat = await stat(filePath);
-          const mtime = Math.floor(fileStat.mtimeMs);
-
-          const existingFile = this.database.getFileByPath(filePath);
-          if (existingFile && existingFile.mtime === mtime) {
-            continue;
-          }
-
-          const relativePath = relative(basePath, filePath).replace(/\\/g, '/');
-          const module = this.deriveModule(relativePath, project.name, language);
-
-          // Config files (e.g. .ini) only need file-level indexing, no type parsing
-          if (language === 'config') {
-            this.database.upsertFile(filePath, project.name, module, mtime, language);
-            changed++;
-            continue;
-          }
-
-          let parsed;
-          let fileContent;
-
-          if (language === 'cpp') {
-            fileContent = await readFile(filePath, 'utf-8');
-            parsed = parseCppContent(fileContent, filePath);
-          } else {
-            fileContent = await readFile(filePath, 'utf-8');
-            parsed = await parseFile(filePath);
-          }
-
-          this.database.transaction(() => {
-            const fileId = this.database.upsertFile(filePath, project.name, module, mtime, language);
-            this.database.clearTypesForFile(fileId);
-
-            const types = [];
-            for (const cls of parsed.classes) {
-              types.push({ name: cls.name, kind: cls.kind || 'class', parent: cls.parent, line: cls.line });
-            }
-            for (const struct of parsed.structs) {
-              types.push({ name: struct.name, kind: 'struct', parent: struct.parent || null, line: struct.line });
-            }
-            for (const en of parsed.enums) {
-              types.push({ name: en.name, kind: 'enum', parent: null, line: en.line });
-            }
-
-            if (language === 'angelscript') {
-              for (const event of parsed.events || []) {
-                types.push({ name: event.name, kind: 'event', parent: null, line: event.line });
-              }
-              for (const delegate of parsed.delegates || []) {
-                types.push({ name: delegate.name, kind: 'delegate', parent: null, line: delegate.line });
-              }
-              for (const ns of parsed.namespaces || []) {
-                types.push({ name: ns.name, kind: 'namespace', parent: null, line: ns.line });
-              }
-            }
-            // C++ delegates
-            if (language === 'cpp') {
-              for (const del of parsed.delegates || []) {
-                types.push({ name: del.name, kind: 'delegate', parent: null, line: del.line });
-              }
-            }
-
-            if (types.length > 0) {
-              this.database.insertTypes(fileId, types);
-            }
-
-            // Insert members
-            if (parsed.members && parsed.members.length > 0) {
-              const typeIds = this.database.getTypeIdsForFile(fileId);
-              const nameToId = new Map(typeIds.map(t => [t.name, t.id]));
-
-              const resolvedMembers = parsed.members.map(m => ({
-                typeId: nameToId.get(m.ownerName) || null,
-                name: m.name,
-                memberKind: m.memberKind,
-                line: m.line,
-                isStatic: m.isStatic,
-                specifiers: m.specifiers
-              }));
-
-              this.database.insertMembers(fileId, resolvedMembers);
-            }
-
-            // Update trigram index
-            if (fileContent && fileContent.length <= 500000) {
-              const trigrams = [...extractTrigrams(fileContent)];
-              const compressed = deflateSync(fileContent);
-              const hash = contentHash(fileContent);
-              this.database.upsertFileContent(fileId, compressed, hash);
-              this.database.clearTrigramsForFile(fileId);
-              if (trigrams.length > 0) {
-                this.database.insertTrigrams(fileId, trigrams);
-              }
-            }
-          });
-
-          if (eventType === 'add') added++;
-          else changed++;
+          if (this.database.deleteFile(filePath)) deleted++;
         }
+      } else {
+        ioTasks.push({ filePath, eventType, project, language });
+      }
+    }
+
+    // Phase 2: Parallel I/O — read files concurrently (P4 drive benefits from concurrency)
+    const MAX_CONCURRENT = 10;
+    const ioResults = [];
+
+    for (let i = 0; i < ioTasks.length; i += MAX_CONCURRENT) {
+      const batch = ioTasks.slice(i, i + MAX_CONCURRENT);
+      const batchResults = await Promise.all(batch.map(task => this._readAndParse(task)));
+      ioResults.push(...batchResults);
+    }
+
+    // Phase 3: Serial DB writes (SQLite requires single-writer)
+    for (const result of ioResults) {
+      if (!result) continue;
+      try {
+        this._writeToDatabase(result);
+        if (result.eventType === 'add') added++;
+        else changed++;
       } catch (err) {
-        console.error(`Error processing ${filePath}:`, err.message);
+        console.error(`Error writing ${result.filePath}:`, err.message);
       }
     }
 
@@ -271,6 +148,146 @@ export class FileWatcher {
       console.log(`[Watcher] +${added} ~${changed} -${deleted} (${updates.size} files) — ${ms}ms`);
       this.onUpdate({ added, changed, deleted });
     }
+  }
+
+  // I/O phase: read file from disk, parse content (can run in parallel)
+  async _readAndParse({ filePath, eventType, project, language }) {
+    try {
+      if (language === 'content') {
+        const basePath = this.findBasePathForFile(filePath, project);
+        if (!basePath) return null;
+
+        const fileStat = await stat(filePath);
+        const mtime = Math.floor(fileStat.mtimeMs);
+        const contentRoot = project.contentRoot || project.paths[0];
+        const relativePath = relative(contentRoot, filePath).replace(/\\/g, '/');
+        const ext = relativePath.match(/\.[^.]+$/)?.[0] || '';
+        const contentPath = '/Game/' + relativePath.replace(/\.[^.]+$/, '');
+        const name = relativePath.split('/').pop().replace(/\.[^.]+$/, '');
+        const folder = '/Game/' + relativePath.split('/').slice(0, -1).join('/');
+
+        let assetClass = null;
+        let parentClass = null;
+        if (ext === '.uasset') {
+          try {
+            const info = parseUAssetHeader(filePath);
+            assetClass = info.assetClass;
+            parentClass = info.parentClass;
+          } catch { /* skip */ }
+        }
+
+        return { filePath, eventType, language, type: 'asset', project, data: {
+          path: filePath, name, contentPath, folder: folder || '/Game',
+          project: project.name, extension: ext, mtime, assetClass, parentClass
+        }};
+      }
+
+      const basePath = this.findBasePathForFile(filePath, project);
+      if (!basePath) return null;
+
+      const fileStat = await stat(filePath);
+      const mtime = Math.floor(fileStat.mtimeMs);
+
+      const existingFile = this.database.getFileByPath(filePath);
+      if (existingFile && existingFile.mtime === mtime) return null;
+
+      const relativePath = relative(basePath, filePath).replace(/\\/g, '/');
+      const module = this.deriveModule(relativePath, project.name, language);
+
+      if (language === 'config') {
+        return { filePath, eventType, language, type: 'config', project, module, mtime };
+      }
+
+      const fileContent = await readFile(filePath, 'utf-8');
+      let parsed;
+      if (language === 'cpp') {
+        parsed = parseCppContent(fileContent, filePath);
+      } else {
+        parsed = await parseFile(filePath);
+      }
+
+      return { filePath, eventType, language, type: 'source', project, module, mtime, parsed, fileContent };
+    } catch (err) {
+      console.error(`Error reading ${filePath}:`, err.message);
+      return null;
+    }
+  }
+
+  // DB write phase: must run serially (single SQLite writer)
+  _writeToDatabase(result) {
+    if (result.type === 'asset') {
+      this.database.upsertAssetBatch([result.data]);
+      return;
+    }
+
+    if (result.type === 'config') {
+      this.database.upsertFile(result.filePath, result.project.name, result.module, result.mtime, result.language);
+      return;
+    }
+
+    // Source file: full type/member/trigram update
+    const { filePath, project, module, mtime, language, parsed, fileContent } = result;
+
+    this.database.transaction(() => {
+      const fileId = this.database.upsertFile(filePath, project.name, module, mtime, language);
+      this.database.clearTypesForFile(fileId);
+
+      const types = [];
+      for (const cls of parsed.classes) {
+        types.push({ name: cls.name, kind: cls.kind || 'class', parent: cls.parent, line: cls.line });
+      }
+      for (const struct of parsed.structs) {
+        types.push({ name: struct.name, kind: 'struct', parent: struct.parent || null, line: struct.line });
+      }
+      for (const en of parsed.enums) {
+        types.push({ name: en.name, kind: 'enum', parent: null, line: en.line });
+      }
+      if (language === 'angelscript') {
+        for (const event of parsed.events || []) {
+          types.push({ name: event.name, kind: 'event', parent: null, line: event.line });
+        }
+        for (const delegate of parsed.delegates || []) {
+          types.push({ name: delegate.name, kind: 'delegate', parent: null, line: delegate.line });
+        }
+        for (const ns of parsed.namespaces || []) {
+          types.push({ name: ns.name, kind: 'namespace', parent: null, line: ns.line });
+        }
+      }
+      if (language === 'cpp') {
+        for (const del of parsed.delegates || []) {
+          types.push({ name: del.name, kind: 'delegate', parent: null, line: del.line });
+        }
+      }
+
+      if (types.length > 0) {
+        this.database.insertTypes(fileId, types);
+      }
+
+      if (parsed.members && parsed.members.length > 0) {
+        const typeIds = this.database.getTypeIdsForFile(fileId);
+        const nameToId = new Map(typeIds.map(t => [t.name, t.id]));
+        const resolvedMembers = parsed.members.map(m => ({
+          typeId: nameToId.get(m.ownerName) || null,
+          name: m.name,
+          memberKind: m.memberKind,
+          line: m.line,
+          isStatic: m.isStatic,
+          specifiers: m.specifiers
+        }));
+        this.database.insertMembers(fileId, resolvedMembers);
+      }
+
+      if (fileContent && fileContent.length <= 500000) {
+        const trigrams = [...extractTrigrams(fileContent)];
+        const compressed = deflateSync(fileContent);
+        const hash = contentHash(fileContent);
+        this.database.upsertFileContent(fileId, compressed, hash);
+        this.database.clearTrigramsForFile(fileId);
+        if (trigrams.length > 0) {
+          this.database.insertTrigrams(fileId, trigrams);
+        }
+      }
+    });
   }
 
   findProjectForPath(filePath) {

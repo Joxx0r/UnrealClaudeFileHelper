@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync, existsSync } from 'fs';
+import { inflateSync } from 'zlib';
 import { extractTrigrams } from './trigram.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1472,6 +1473,78 @@ export class IndexDatabase {
     return this.db.prepare(sql).all(...params);
   }
 
+  /**
+   * Full grep pipeline: query trigram candidates, decompress, regex match — all in one call.
+   * Designed to run entirely inside a worker thread so main thread stays free.
+   */
+  grepInline(pattern, flags, maxResults, contextLines, { project, language, trigrams } = {}) {
+    if (!trigrams || trigrams.length === 0) return null;
+
+    // Step 1: Query trigram candidates (same as queryTrigramCandidates)
+    const placeholders = trigrams.map(() => '?').join(',');
+    let sql = `
+      SELECT fc.file_id, fc.content, f.path, f.project, f.language
+      FROM trigrams t
+      JOIN file_content fc ON t.file_id = fc.file_id
+      JOIN files f ON f.id = fc.file_id
+      WHERE t.trigram IN (${placeholders})
+        AND f.language != 'content'
+    `;
+    const params = [...trigrams];
+    if (project) { sql += ' AND f.project = ?'; params.push(project); }
+    if (language && language !== 'all') { sql += ' AND f.language = ?'; params.push(language); }
+    sql += ' GROUP BY t.file_id HAVING COUNT(DISTINCT t.trigram) = ?';
+    params.push(trigrams.length);
+
+    const candidates = this.db.prepare(sql).all(...params);
+
+    // Step 2: Decompress and regex match
+    const regex = new RegExp(pattern, flags);
+    const results = [];
+    let totalMatches = 0;
+    let filesSearched = 0;
+
+    for (const entry of candidates) {
+      if (results.length >= maxResults) break;
+      filesSearched++;
+
+      let content;
+      try {
+        content = inflateSync(entry.content).toString('utf-8');
+      } catch {
+        continue;
+      }
+
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const match = regex.exec(lines[i]);
+        if (!match) continue;
+
+        totalMatches++;
+        if (results.length < maxResults) {
+          const ctxStart = Math.max(0, i - contextLines);
+          const ctxEnd = Math.min(lines.length - 1, i + contextLines);
+          const context = [];
+          for (let c = ctxStart; c <= ctxEnd; c++) {
+            context.push(lines[c]);
+          }
+          results.push({
+            file: entry.path,
+            project: entry.project,
+            language: entry.language,
+            line: i + 1,
+            column: match.index + 1,
+            match: lines[i],
+            context
+          });
+        }
+        if (results.length >= maxResults) break;
+      }
+    }
+
+    return { results, totalMatches, filesSearched };
+  }
+
   isTrigramIndexReady() {
     const needed = this.getMetadata('trigramBuildNeeded');
     return needed === false || needed === null;
@@ -1678,7 +1751,7 @@ export class IndexDatabase {
 const methodsToTime = [
   'findTypeByName', 'findChildrenOf', 'findMember', 'findFileByName',
   'findAssetByName', 'getStats', 'getAssetStats', 'upsertAssetBatch',
-  'queryTrigramCandidates'
+  'queryTrigramCandidates', 'grepInline'
 ];
 for (const method of methodsToTime) {
   const original = IndexDatabase.prototype[method];
