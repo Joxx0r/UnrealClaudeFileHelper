@@ -324,7 +324,7 @@ class InstallWorker(QThread):
         # Step 7: Validate service
         self.step_started.emit(7, "Validating service startup...")
         port = int(self._config.get("service", {}).get("port", 3847))
-        ok, msg = validate_service(port, timeout_secs=20)
+        ok, msg = validate_service(port, timeout_secs=30)
         self.step_completed.emit(7, ok, msg)
         if not ok:
             self.log_output.emit("  Service did not start. Check WSL and Node.js installation.")

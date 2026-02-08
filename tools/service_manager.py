@@ -143,22 +143,14 @@ def start_index_service() -> bool:
         except (OSError, FileNotFoundError):
             return False
 
-    # Kill any existing screen session
-    try:
-        subprocess.run(
-            ["wsl", "-d", _get_wsl_distro(), "--", "bash", "-c",
-             f"screen -S {_SCREEN_SESSION} -X quit 2>/dev/null"],
-            capture_output=True, timeout=5,
-            creationflags=_CREATE_NO_WINDOW,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-
-    # Determine WSL repo path
     wsl_repo = "~/repos/unreal-index"
 
+    # Combine kill + start in a single WSL call so screen sessions share
+    # the same login context (separate wsl invocations can't see each
+    # other's screen sessions).
     try:
         script = (
+            f"screen -S {_SCREEN_SESSION} -X quit 2>/dev/null; "
             f"cd {wsl_repo} && "
             f"screen -dmS {_SCREEN_SESSION} bash -c '"
             f'export PATH="$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bin:$PATH" && '
