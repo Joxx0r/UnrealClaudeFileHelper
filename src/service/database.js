@@ -65,7 +65,9 @@ function dedupTypes(results) {
       if (r.path && r.path.endsWith('.cpp')) existing.implementationPath = r.path;
     }
   }
-  return [...best.values()];
+  const deduped = [...best.values()];
+  deduped.sort((a, b) => scoreEntry(b) - scoreEntry(a));
+  return deduped;
 }
 
 function scoreEntry(r) {
