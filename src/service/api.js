@@ -159,10 +159,12 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
               database.upsertFileContent(fileId, compressed, hash);
 
               // Write to Zoekt mirror
-              if (zoektMirror && zoektManager) {
+              if (zoektManager) {
                 try {
-                  const relativePath = zoektMirror._toRelativePath(file.path);
-                  zoektManager.updateMirrorFile(relativePath, file.content);
+                  const mirrorPath = file.relativePath
+                    ? `${file.project}/${file.relativePath}`
+                    : (zoektMirror ? zoektMirror._toRelativePath(file.path) : file.path);
+                  zoektManager.updateMirrorFile(mirrorPath, file.content);
                 } catch {}
               }
             }

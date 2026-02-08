@@ -132,7 +132,7 @@ async function readAndParseSource(filePath, project, language) {
   const module = deriveModule(relativePath, project.name);
 
   if (language === 'config') {
-    return { path: filePath, project: project.name, module, mtime, language, types: [], members: [] };
+    return { path: filePath, project: project.name, module, mtime, language, relativePath, types: [], members: [] };
   }
 
   const content = await readFile(filePath, 'utf-8');
@@ -158,6 +158,7 @@ async function readAndParseSource(filePath, project, language) {
 
   return {
     path: filePath, project: project.name, module, mtime, language, content,
+    relativePath,
     types, members: parsed.members || []
   };
 }
