@@ -480,17 +480,35 @@ class IndexStatsPanel(QFrame):
                 lbl.setVisible(False)
 
     def _extract_projects(self, status: dict | None, summary: dict | None, stats: dict) -> list[dict]:
+        # Check status endpoint for a list of project dicts
         if status and isinstance(status.get("projects"), list):
-            return status["projects"]
-        if summary and isinstance(summary.get("projects"), list):
-            return summary["projects"]
+            items = status["projects"]
+            if items and isinstance(items[0], dict):
+                return items
+
+        # stats.projects is a dict like {"Engine": {"files": N, "language": "cpp"}, ...}
+        stats_projects = stats.get("projects", {})
+        if isinstance(stats_projects, dict) and stats_projects:
+            projects = []
+            for name, proj_data in stats_projects.items():
+                if isinstance(proj_data, dict):
+                    projects.append({
+                        "name": name,
+                        "language": proj_data.get("language", ""),
+                        "files": proj_data.get("files", 0),
+                        "status": "indexed",
+                    })
+            return projects
+
+        # Fallback: group by language
         projects = []
         by_lang = stats.get("byLanguage", {})
         for lang, lang_data in by_lang.items():
-            projects.append({
-                "name": _LANG_LABELS.get(lang, lang),
-                "language": lang,
-                "files": lang_data.get("files", 0),
-                "status": "indexed",
-            })
+            if isinstance(lang_data, dict):
+                projects.append({
+                    "name": _LANG_LABELS.get(lang, lang),
+                    "language": lang,
+                    "files": lang_data.get("files", 0),
+                    "status": "indexed",
+                })
         return projects

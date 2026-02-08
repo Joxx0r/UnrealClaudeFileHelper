@@ -421,7 +421,7 @@ class SetupView(QWidget):
 
         dirs = _detect_directories(self._project_root)
         for d in dirs:
-            checked = d["language"] != "content"  # Content unchecked by default
+            checked = True  # All detected directories checked by default
             cb = QCheckBox(f"{d['subdir']}/ ({d['language']})  —  {d['path']}")
             cb.setChecked(checked)
             cb.stateChanged.connect(lambda _: self._rebuild_preview())
@@ -709,7 +709,7 @@ class UnrealIndexApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Unreal Index")
-        self.setMinimumSize(700, 600)
+        self.setMinimumSize(750, 750)
 
         self._stack = QStackedWidget()
         self.setCentralWidget(self._stack)
