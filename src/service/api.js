@@ -284,6 +284,11 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         }
       }
 
+      // Flag inheritance depth for recomputation after new types are ingested
+      if (processed > 0) {
+        database.setMetadata('depthComputeNeeded', true);
+      }
+
       // Trigger Zoekt reindex for affected projects
       if (zoektManager && affectedProjects.size > 0) {
         zoektManager.triggerReindex(processed, affectedProjects);
@@ -335,6 +340,13 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   function refreshStatsCache() {
     try {
+      // Recompute inheritance depth if flagged (debounced via timer)
+      if (database.getMetadata('depthComputeNeeded')) {
+        const t = performance.now();
+        const count = database.computeInheritanceDepth();
+        console.log(`[Stats] inheritance depth recomputed: ${count} types (${(performance.now() - t).toFixed(0)}ms)`);
+      }
+
       const stats = database.getStats();
       const lastBuild = database.getMetadata('lastBuild');
       const indexStatus = database.getAllIndexStatus();
@@ -390,7 +402,10 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findTypeByName', [name, opts]);
-      results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
+      results.forEach(r => {
+        if (r.path) r.path = cleanPath(r.path, r.project);
+        if (r.implementationPath) r.implementationPath = cleanPath(r.implementationPath, r.project);
+      });
       res.json({ results });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -502,7 +517,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-member', async (req, res) => {
     try {
-      const { name, fuzzy, containingType, memberKind, project, language, maxResults } = req.query;
+      const { name, fuzzy, containingType, containingTypeHierarchy, memberKind, project, language, maxResults } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
@@ -513,6 +528,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const opts = {
         fuzzy: fuzzy === 'true',
         containingType: containingType || null,
+        containingTypeHierarchy: containingTypeHierarchy === 'true',
         memberKind: memberKind || null,
         project: project || null,
         language: language || null,
@@ -720,6 +736,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     // Over-fetch from Zoekt when multi-word post-filter will discard many results
     const isMultiWord = !hasRegexMeta(pattern) && pattern.includes(' ');
     const zoektMaxResults = isMultiWord ? Math.max(maxResults * 5, 100) : maxResults;
+    // Request context lines for proximity matching on multi-word queries
+    const effectiveContextLines = isMultiWord ? Math.max(contextLines, 3) : contextLines;
 
     try {
       // Source search + optional asset search via Zoekt
@@ -728,7 +746,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         language: (language && language !== 'all') ? language : null,
         caseSensitive,
         maxResults: zoektMaxResults,
-        contextLines
+        contextLines: effectiveContextLines
       });
       const assetPromise = includeAssets
         ? zoektClient.searchAssets(pattern, { project: project || null, caseSensitive, maxResults: 20 })
@@ -740,15 +758,25 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
       // Post-filter: Zoekt tokenizes multi-word queries, so "class Foo" matches
       // lines with "class" OR "Foo" separately. For multi-word literal patterns,
-      // require ALL words to appear in the match line (not necessarily adjacent,
-      // since "class MYAPI ADiscoveryGameMode" has words in between).
+      // require ALL words to appear in the match line or within nearby context lines.
       if (!hasRegexMeta(pattern) && pattern.includes(' ')) {
         const words = pattern.split(/\s+/).filter(Boolean);
         if (words.length > 1) {
           const needles = words.map(w => caseSensitive ? w : w.toLowerCase());
           results = results.filter(r => {
             const hay = caseSensitive ? r.match : r.match.toLowerCase();
-            return needles.every(n => hay.includes(n));
+            // Exact: all words on the same line
+            if (needles.every(n => hay.includes(n))) return true;
+            // Proximity: all words within match line + context lines
+            if (r.context && r.context.length > 0) {
+              const allText = [r.match, ...r.context].join(' ');
+              const allHay = caseSensitive ? allText : allText.toLowerCase();
+              if (needles.every(n => allHay.includes(n))) {
+                r._proximityMatch = true;
+                return true;
+              }
+            }
+            return false;
           });
         }
       }
@@ -757,7 +785,12 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
       const uniquePaths = [...new Set(results.map(r => r.file))];
       const mtimeMap = database.getFilesMtime(uniquePaths);
-      results = rankResults(results, mtimeMap);
+
+      // Symbol cross-reference: boost results at known type/member definitions
+      const fileLines = results.map(r => ({ path: r.file, line: r.line }));
+      const symbolMap = database.findSymbolsAtLocations(fileLines);
+
+      results = rankResults(results, mtimeMap, symbolMap);
       if (results.length > maxResults) results = results.slice(0, maxResults);
 
       const durationMs = Math.round(performance.now() - grepStartMs);

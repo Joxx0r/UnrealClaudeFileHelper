@@ -81,6 +81,27 @@ export function parseCppContent(content, filePath = '') {
         continue;
       }
 
+      // Type alias: using FVector = UE::Math::TVector<double>;
+      const usingMatch = trimmed.match(
+        /^\s*using\s+([FUAESI]\w+)\s*=\s*(?:[\w:]+::)*(\w+)(?:<[^>]*>)?\s*;/
+      );
+      if (usingMatch) {
+        const aliasName = usingMatch[1];
+        const targetType = usingMatch[2];
+        const prefix = aliasName[0];
+        const parent = targetType !== aliasName ? targetType : null;
+        if (prefix === 'F' || prefix === 'S') {
+          result.structs.push({ name: aliasName, parent, line: lineNum, reflected: false, specifiers: [] });
+        } else if (prefix === 'E') {
+          result.enums.push({ name: aliasName, line: lineNum, reflected: false, specifiers: [] });
+        } else {
+          result.classes.push({ name: aliasName, parent, line: lineNum, reflected: false,
+            kind: prefix === 'I' ? 'interface' : 'class', specifiers: [] });
+        }
+        braceDepth += braceDelta;
+        continue;
+      }
+
       // Class declaration
       const classMatch = trimmed.match(/^\s*class\s+(?:(\w+_API)\s+)?(\w+)(?:\s+final)?(?:\s*:\s*(?:public|private|protected)\s+(\w+))?/);
       if (classMatch) {

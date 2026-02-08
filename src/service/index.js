@@ -106,6 +106,13 @@ class UnrealIndexService {
     this.database = new IndexDatabase(dbPath).open();
     console.log(`[Startup] database open: ${(performance.now() - t).toFixed(0)}ms`);
 
+    // Compute inheritance depth if needed (before spawning workers so they get fresh data)
+    if (this.database.getMetadata('depthComputeNeeded')) {
+      t = performance.now();
+      const depthCount = this.database.computeInheritanceDepth();
+      console.log(`[Startup] inheritance depth: ${depthCount} types (${(performance.now() - t).toFixed(0)}ms)`);
+    }
+
     // Spawn query worker pool
     const workerCount = Math.min(5, Math.max(1, os.cpus().length - 1));
     t = performance.now();

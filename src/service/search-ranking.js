@@ -51,9 +51,10 @@ export function recencyScore(mtime, now) {
  *
  * @param {Array} results - Flat grep results [{file, project, language, line, match, context?}]
  * @param {Map<string, number>} mtimeMap - Map of file path -> mtime (from database)
+ * @param {Map<string, object>} [symbolMap] - Map of "path:line" -> {name, kind, entityType} from symbol cross-ref
  * @returns {Array} Same array, sorted by relevance
  */
-export function rankResults(results, mtimeMap) {
+export function rankResults(results, mtimeMap, symbolMap = null) {
   if (!results || results.length === 0) return results;
 
   const now = Date.now();
@@ -79,12 +80,26 @@ export function rankResults(results, mtimeMap) {
     fileScores.set(file, score);
   }
 
-  // Per-result scoring: file score + definition boost
+  // Per-result scoring: file score + definition boost + symbol cross-ref + proximity penalty
   results.sort((a, b) => {
-    const sa = (fileScores.get(a.file) || 0) + (isDefinitionLine(a.match) ? 8 : 0);
-    const sb = (fileScores.get(b.file) || 0) + (isDefinitionLine(b.match) ? 8 : 0);
+    const symbolA = symbolMap ? symbolMap.get(`${a.file}:${a.line}`) : null;
+    const symbolB = symbolMap ? symbolMap.get(`${b.file}:${b.line}`) : null;
+
+    const sa = (fileScores.get(a.file) || 0)
+      + (isDefinitionLine(a.match) ? 8 : 0)
+      + (symbolA ? 6 : 0)
+      + (a._proximityMatch ? -3 : 0);
+    const sb = (fileScores.get(b.file) || 0)
+      + (isDefinitionLine(b.match) ? 8 : 0)
+      + (symbolB ? 6 : 0)
+      + (b._proximityMatch ? -3 : 0);
     return sb - sa || a.line - b.line;
   });
+
+  // Strip transient fields before returning
+  for (const r of results) {
+    delete r._proximityMatch;
+  }
 
   return results;
 }

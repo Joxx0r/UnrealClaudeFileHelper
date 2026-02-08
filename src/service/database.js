@@ -10,13 +10,59 @@ const __dirname = dirname(__filename);
 
 const SLOW_QUERY_MS = 100;
 
+// --- Search quality helpers ---
+
+const SPECIFIER_BOOST = {
+  'BlueprintCallable': 0.05, 'BlueprintPure': 0.05,
+  'BlueprintReadWrite': 0.04, 'BlueprintReadOnly': 0.04,
+  'BlueprintImplementableEvent': 0.04, 'BlueprintNativeEvent': 0.04,
+  'EditAnywhere': 0.03, 'EditDefaultsOnly': 0.02,
+  'VisibleAnywhere': 0.02, 'Replicated': 0.02,
+};
+const MAX_SPECIFIER_BOOST = 0.08;
+
+function specifierBoost(specifiers) {
+  if (!specifiers) return 0;
+  let boost = 0;
+  for (const [spec, value] of Object.entries(SPECIFIER_BOOST)) {
+    if (specifiers.includes(spec)) boost += value;
+  }
+  return Math.min(boost, MAX_SPECIFIER_BOOST);
+}
+
+const KIND_WEIGHT = {
+  'class': 0.04, 'struct': 0.03, 'interface': 0.03,
+  'enum': 0.02, 'delegate': 0.01, 'event': 0.01,
+};
+
+function trigramThreshold(nameLength) {
+  if (nameLength <= 5) return 0.60;
+  if (nameLength <= 15) return 0.75;
+  return 0.80;
+}
+
+function splitCamelCase(name) {
+  return name.replace(/^[UAFESI](?=[A-Z])/, '')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .split(/\s+/).map(w => w.toLowerCase()).filter(w => w.length > 0);
+}
+
 function dedupTypes(results) {
   const best = new Map();
   for (const r of results) {
     const key = `${r.name}:${r.kind}`;
     const existing = best.get(key);
-    if (!existing || scoreEntry(r) > scoreEntry(existing)) {
+    if (!existing) { best.set(key, r); continue; }
+    const existingScore = scoreEntry(existing);
+    const newScore = scoreEntry(r);
+    if (newScore > existingScore) {
+      // New entry is better — preserve old .cpp path as implementationPath
+      if (existing.path && existing.path.endsWith('.cpp')) r.implementationPath = existing.path;
       best.set(key, r);
+    } else {
+      // Existing is better — store new .cpp path as implementationPath
+      if (r.path && r.path.endsWith('.cpp')) existing.implementationPath = r.path;
     }
   }
   return [...best.values()];
@@ -26,7 +72,48 @@ function scoreEntry(r) {
   let s = 0;
   if (r.parent) s += 10;
   if (r.path && r.path.endsWith('.h')) s += 5;
+  // Path-centrality tiebreakers (max +4, never overrides parent/header signals)
+  if (r.path) {
+    const p = r.path.replace(/\\/g, '/');
+    if (p.includes('/Runtime/')) s += 2;
+    else if (p.includes('/Developer/')) s += 1;
+    if (p.includes('/Public/') || p.includes('/Classes/')) s += 1.5;
+    else if (p.includes('/Private/')) s += 0.5;
+    s += Math.max(0, 0.5 - p.length * 0.004);
+  }
   return s;
+}
+
+class QueryCache {
+  constructor(maxSize = 500, ttlMs = 60000) {
+    this.maxSize = maxSize;
+    this.ttlMs = ttlMs;
+    this.cache = new Map();
+  }
+
+  get(key) {
+    const entry = this.cache.get(key);
+    if (!entry) return undefined;
+    if (Date.now() - entry.timestamp > this.ttlMs) {
+      this.cache.delete(key);
+      return undefined;
+    }
+    // LRU refresh: move to end
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+    return entry.result;
+  }
+
+  set(key, result) {
+    if (this.cache.size >= this.maxSize) {
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
+    }
+    this.cache.set(key, { result, timestamp: Date.now() });
+  }
+
+  invalidate() { this.cache.clear(); }
+  get size() { return this.cache.size; }
 }
 
 export class IndexDatabase {
@@ -34,6 +121,7 @@ export class IndexDatabase {
     this.dbPath = dbPath || join(__dirname, '..', '..', 'data', 'index.db');
     this.db = null;
     this.readOnly = false;
+    this.queryCache = new QueryCache(500, 60000);
   }
 
   open(readOnly = false) {
@@ -217,6 +305,7 @@ export class IndexDatabase {
     if (!hasRelativePathColumn) {
       this.db.exec(`ALTER TABLE files ADD COLUMN relative_path TEXT`);
     }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_files_relative_path ON files(relative_path)`);
 
     const hasMembersTable = this.db.prepare(`
       SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='members'
@@ -308,6 +397,15 @@ export class IndexDatabase {
       // Flag that name trigram index needs building from existing types/members
       this.setMetadata('nameTrigramBuildNeeded', true);
     }
+
+    // Migrate types table to include depth column for inheritance depth ranking
+    const hasDepthColumn = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pragma_table_info('types') WHERE name = 'depth'
+    `).get().count > 0;
+    if (!hasDepthColumn) {
+      this.db.exec(`ALTER TABLE types ADD COLUMN depth INTEGER`);
+      this.setMetadata('depthComputeNeeded', true);
+    }
   }
 
   close() {
@@ -353,6 +451,81 @@ export class IndexDatabase {
       }
     }
     return result;
+  }
+
+  findSymbolsAtLocations(fileLines) {
+    // fileLines: [{path, line}, ...] — paths are cleaned (project/relativePath format)
+    // Returns Map<"path:line", {name, kind, entityType}>
+    if (!fileLines || fileLines.length === 0) return new Map();
+
+    const results = new Map();
+    const pathsToLines = new Map();
+    for (const { path, line } of fileLines) {
+      if (!pathsToLines.has(path)) pathsToLines.set(path, []);
+      pathsToLines.get(path).push(line);
+    }
+
+    const paths = [...pathsToLines.keys()];
+    const chunkSize = 200;
+    for (let i = 0; i < paths.length; i += chunkSize) {
+      const chunk = paths.slice(i, i + chunkSize);
+      const placeholders = chunk.map(() => '?').join(',');
+
+      // Look up file IDs by path (match on suffix since DB may have full paths)
+      const fileRows = this.db.prepare(`
+        SELECT id, path FROM files WHERE path IN (${placeholders})
+      `).all(...chunk);
+
+      // Also try relative_path match
+      const relFileRows = this.db.prepare(`
+        SELECT id, relative_path as path FROM files
+        WHERE relative_path IN (${placeholders}) AND relative_path IS NOT NULL
+      `).all(...chunk);
+
+      const fileIdToPath = new Map();
+      for (const r of [...fileRows, ...relFileRows]) {
+        fileIdToPath.set(r.id, r.path);
+      }
+
+      const fileIds = [...fileIdToPath.keys()];
+      if (fileIds.length === 0) continue;
+
+      const idPh = fileIds.map(() => '?').join(',');
+
+      const types = this.db.prepare(`
+        SELECT file_id, name, kind, line FROM types WHERE file_id IN (${idPh})
+      `).all(...fileIds);
+
+      const members = this.db.prepare(`
+        SELECT m.file_id, m.name, m.member_kind as kind, m.line, t.name as type_name
+        FROM members m LEFT JOIN types t ON m.type_id = t.id
+        WHERE m.file_id IN (${idPh})
+      `).all(...fileIds);
+
+      for (const t of types) {
+        const fp = fileIdToPath.get(t.file_id);
+        const lines = pathsToLines.get(fp);
+        if (!lines) continue;
+        for (const line of lines) {
+          if (Math.abs(line - t.line) <= 3) {
+            results.set(`${fp}:${line}`, { name: t.name, kind: t.kind, entityType: 'type' });
+          }
+        }
+      }
+
+      for (const m of members) {
+        const fp = fileIdToPath.get(m.file_id);
+        const lines = pathsToLines.get(fp);
+        if (!lines) continue;
+        for (const line of lines) {
+          if (Math.abs(line - m.line) <= 3) {
+            results.set(`${fp}:${line}`, { name: m.name, kind: m.kind, type_name: m.type_name, entityType: 'member' });
+          }
+        }
+      }
+    }
+
+    return results;
   }
 
   upsertFile(path, project, module, mtime, language = 'angelscript', relativePath = null) {
@@ -474,8 +647,33 @@ export class IndexDatabase {
     return this.db.prepare('SELECT id, name FROM types WHERE file_id = ?').all(fileId);
   }
 
+  _getSubtypeNames(parentClass) {
+    const children = new Set();
+    let frontier = [parentClass];
+
+    while (frontier.length > 0) {
+      const placeholders = frontier.map(() => '?').join(',');
+      const directChildren = this.db.prepare(`
+        SELECT DISTINCT t.name FROM types t
+        WHERE t.parent IN (${placeholders}) AND t.kind IN ('class', 'struct', 'interface')
+      `).all(...frontier);
+
+      const nextFrontier = [];
+      for (const child of directChildren) {
+        if (!children.has(child.name)) {
+          children.add(child.name);
+          nextFrontier.push(child.name);
+        }
+      }
+      frontier = nextFrontier;
+    }
+
+    return [...children];
+  }
+
   findMember(name, options = {}) {
-    const { fuzzy = false, containingType = null, memberKind = null, project = null, language = null, maxResults = 20 } = options;
+    const { fuzzy = false, containingType = null, containingTypeHierarchy = false,
+            memberKind = null, project = null, language = null, maxResults = 20 } = options;
 
     if (!fuzzy) {
       let sql = `
@@ -487,7 +685,12 @@ export class IndexDatabase {
       `;
       const params = [name];
 
-      if (containingType) {
+      if (containingType && containingTypeHierarchy) {
+        const typeNames = [containingType, ...this._getSubtypeNames(containingType)];
+        const ph = typeNames.map(() => '?').join(',');
+        sql += ` AND t.name IN (${ph})`;
+        params.push(...typeNames);
+      } else if (containingType) {
         sql += ' AND t.name = ?';
         params.push(containingType);
       }
@@ -507,7 +710,7 @@ export class IndexDatabase {
       sql += ' LIMIT ?';
       params.push(maxResults);
 
-      return this.db.prepare(sql).all(...params).map(({ id, ...rest }) => rest);
+      return this.db.prepare(sql).all(...params).map(({ id, ...rest }) => ({ ...rest, matchReason: 'exact' }));
     }
 
     const nameLower = name.toLowerCase();
@@ -523,7 +726,17 @@ export class IndexDatabase {
     `;
     const params = [`${nameLower}%`];
 
-    if (containingType) { sql += ' AND t.name = ?'; params.push(containingType); }
+    // Resolve hierarchy once for reuse in both prefix and trigram queries
+    const typeNames = containingType && containingTypeHierarchy
+      ? [containingType, ...this._getSubtypeNames(containingType)]
+      : null;
+
+    if (typeNames) {
+      const ph = typeNames.map(() => '?').join(',');
+      sql += ` AND t.name IN (${ph})`; params.push(...typeNames);
+    } else if (containingType) {
+      sql += ' AND t.name = ?'; params.push(containingType);
+    }
     if (memberKind) { sql += ' AND m.member_kind = ?'; params.push(memberKind); }
     if (project) { sql += ' AND f.project = ?'; params.push(project); }
     if (language && language !== 'all') { sql += ' AND f.language = ?'; params.push(language); }
@@ -536,7 +749,8 @@ export class IndexDatabase {
       const trigrams = [...extractTrigrams(nameLower)];
       if (trigrams.length >= 3) {
         const placeholders = trigrams.map(() => '?').join(',');
-        const minMatch = Math.max(3, Math.ceil(trigrams.length * 0.75));
+        const threshold = trigramThreshold(nameLower.length);
+        const minMatch = Math.max(2, Math.ceil(trigrams.length * threshold));
         const trigramSql = `
           SELECT nt.entity_id
           FROM name_trigrams nt
@@ -560,7 +774,10 @@ export class IndexDatabase {
               WHERE m.id IN (${idPlaceholders})
             `;
             const trigramParams = [...newIds];
-            if (containingType) { trigramMemberSql += ' AND t.name = ?'; trigramParams.push(containingType); }
+            if (typeNames) {
+              const ph = typeNames.map(() => '?').join(',');
+              trigramMemberSql += ` AND t.name IN (${ph})`; trigramParams.push(...typeNames);
+            } else if (containingType) { trigramMemberSql += ' AND t.name = ?'; trigramParams.push(containingType); }
             if (memberKind) { trigramMemberSql += ' AND m.member_kind = ?'; trigramParams.push(memberKind); }
             if (project) { trigramMemberSql += ' AND f.project = ?'; trigramParams.push(project); }
             if (language && language !== 'all') { trigramMemberSql += ' AND f.language = ?'; trigramParams.push(language); }
@@ -573,15 +790,17 @@ export class IndexDatabase {
     }
 
     const searchTrigrams = nameLower.length >= 3 ? new Set(extractTrigrams(nameLower)) : null;
+    const searchWords = splitCamelCase(name);
 
     const scored = candidates.map(row => {
       const candidateLower = row.name.toLowerCase();
       let score = 0;
+      let matchReason = 'trigram';
 
-      if (candidateLower === nameLower) score = 1.0;
-      else if (candidateLower.startsWith(nameLower)) score = 0.95;
-      else if (candidateLower.includes(nameLower)) score = 0.85;
-      else if (nameLower.includes(candidateLower)) score = 0.8;
+      if (candidateLower === nameLower) { score = 1.0; matchReason = 'exact'; }
+      else if (candidateLower.startsWith(nameLower)) { score = 0.95; matchReason = 'prefix'; }
+      else if (candidateLower.includes(nameLower)) { score = 0.85; matchReason = 'substring'; }
+      else if (nameLower.includes(candidateLower)) { score = 0.8; matchReason = 'reverse-substring'; }
       else if (searchTrigrams) {
         // Trigram similarity: Jaccard coefficient
         const candidateTrigrams = new Set(extractTrigrams(candidateLower));
@@ -591,9 +810,24 @@ export class IndexDatabase {
         }
         const union = searchTrigrams.size + candidateTrigrams.size - intersection;
         score = union > 0 ? (intersection / union) * 0.7 : 0;
+        matchReason = 'trigram';
       }
 
-      return { ...row, score };
+      // Word-level matching for better compound name handling
+      if (score < 0.7 && searchWords.length >= 2) {
+        const candidateWords = splitCamelCase(row.name);
+        const compoundMatched = searchWords.filter(sw =>
+          candidateWords.some(cw => cw.startsWith(sw) || sw.startsWith(cw))
+        );
+        const compoundRatio = compoundMatched.length / searchWords.length;
+        if (compoundRatio === 1 && score < 0.7) { score = 0.7; matchReason = 'word-match-all'; }
+        else if (compoundRatio >= 0.66 && score < 0.5) { score = 0.5; matchReason = 'word-match-most'; }
+      }
+
+      // Specifier boost (tiebreaker for gameplay-facing members)
+      score += specifierBoost(row.specifiers);
+
+      return { ...row, score, matchReason };
     });
 
     scored.sort((a, b) => b.score - a.score);
@@ -673,7 +907,7 @@ export class IndexDatabase {
         sql += ' LIMIT ?';
         params.push(maxResults);
 
-        results = this.db.prepare(sql).all(...params);
+        results = this.db.prepare(sql).all(...params).map(r => ({ ...r, matchReason: 'exact' }));
 
         if (results.length === 0) {
           // Batch prefix fallback: try all UE prefix variants in a single query
@@ -708,7 +942,7 @@ export class IndexDatabase {
             }
             batchSql += ' LIMIT ?';
             batchParams.push(maxResults);
-            results = this.db.prepare(batchSql).all(...batchParams);
+            results = this.db.prepare(batchSql).all(...batchParams).map(r => ({ ...r, matchReason: 'prefix-variant' }));
           }
         }
       }
@@ -726,12 +960,12 @@ export class IndexDatabase {
         assetSql += ' LIMIT ?';
         assetParams.push(maxResults - results.length);
 
-        let assetResults = this.db.prepare(assetSql).all(...assetParams);
+        let assetResults = this.db.prepare(assetSql).all(...assetParams).map(r => ({ ...r, matchReason: 'exact' }));
 
         // Try without _C suffix (BlueprintGeneratedClass names end in _C)
         if (assetResults.length === 0 && name.endsWith('_C')) {
           assetParams[0] = name.slice(0, -2);
-          assetResults = this.db.prepare(assetSql).all(...assetParams);
+          assetResults = this.db.prepare(assetSql).all(...assetParams).map(r => ({ ...r, matchReason: 'exact' }));
         }
 
         results.push(...assetResults);
@@ -751,7 +985,7 @@ export class IndexDatabase {
 
       // Step 1: Try prefix match (fast, uses idx_types_name_lower)
       let sql = `
-        SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project
+        SELECT t.id, t.name, t.kind, t.parent, t.line, t.depth, f.path, f.project
         FROM types t
         JOIN files f ON t.file_id = f.id
         WHERE lower(t.name) LIKE ?
@@ -766,6 +1000,74 @@ export class IndexDatabase {
       params.push(maxResults * 3);
       candidates.push(...this.db.prepare(sql).all(...params));
 
+      // Step 1.5: UE prefix-expanded search (finds APawn when searching "Pawn")
+      // Split into exact matches first (guaranteed to find AActor for "Actor"),
+      // then prefix LIKE matches separately to avoid LIMIT truncation.
+      {
+        const existingIds = new Set(candidates.map(c => c.id));
+
+        // Build exact name variants: aactor, uactor, factor, etc.
+        const exactNames = new Set();
+        for (const p of ['a', 'u', 'f', 'e', 's', 'i']) {
+          exactNames.add(`${p}${nameLower}`);
+        }
+        if (nameStripped !== nameLower) {
+          for (const p of ['a', 'u', 'f', 'e', 's', 'i', '']) {
+            exactNames.add(`${p}${nameStripped}`);
+          }
+        }
+
+        // Sub-step A: Exact name matches (high priority, no LIMIT issue)
+        if (exactNames.size > 0) {
+          const placeholders = [...exactNames].map(() => '?').join(',');
+          let exactSql = `
+            SELECT t.id, t.name, t.kind, t.parent, t.line, t.depth, f.path, f.project
+            FROM types t
+            JOIN files f ON t.file_id = f.id
+            WHERE lower(t.name) IN (${placeholders})
+              AND t.id NOT IN (${existingIds.size > 0 ? [...existingIds].map(() => '?').join(',') : '-1'})
+          `;
+          const exactParams = [...exactNames];
+          if (existingIds.size > 0) exactParams.push(...existingIds);
+          if (kind) { exactSql += ' AND t.kind = ?'; exactParams.push(kind); }
+          if (project) { exactSql += ' AND f.project = ?'; exactParams.push(project); }
+          if (language && language !== 'all' && language !== 'blueprint') {
+            exactSql += ' AND f.language = ?'; exactParams.push(language);
+          }
+          exactSql += ' LIMIT ?';
+          exactParams.push(maxResults);
+          const exactResults = this.db.prepare(exactSql).all(...exactParams);
+          candidates.push(...exactResults);
+          for (const r of exactResults) existingIds.add(r.id);
+        }
+
+        // Sub-step B: Prefix LIKE matches (fills remaining slots)
+        if (candidates.length < maxResults * 3) {
+          const prefixPatterns = [];
+          for (const p of ['a', 'u', 'f', 'e', 's', 'i']) {
+            prefixPatterns.push(`${p}${nameLower}%`);
+          }
+          const likeConditions = prefixPatterns.map(() => 'lower(t.name) LIKE ?').join(' OR ');
+          let likeSql = `
+            SELECT t.id, t.name, t.kind, t.parent, t.line, t.depth, f.path, f.project
+            FROM types t
+            JOIN files f ON t.file_id = f.id
+            WHERE (${likeConditions})
+              AND t.id NOT IN (${existingIds.size > 0 ? [...existingIds].map(() => '?').join(',') : '-1'})
+          `;
+          const likeParams = [...prefixPatterns];
+          if (existingIds.size > 0) likeParams.push(...existingIds);
+          if (kind) { likeSql += ' AND t.kind = ?'; likeParams.push(kind); }
+          if (project) { likeSql += ' AND f.project = ?'; likeParams.push(project); }
+          if (language && language !== 'all' && language !== 'blueprint') {
+            likeSql += ' AND f.language = ?'; likeParams.push(language);
+          }
+          likeSql += ' LIMIT ?';
+          likeParams.push(maxResults * 2);
+          candidates.push(...this.db.prepare(likeSql).all(...likeParams));
+        }
+      }
+
       // Step 2: If not enough results and name is long enough for trigrams, use trigram index
       let usedTrigramSearch = false;
       if (candidates.length < maxResults && nameLower.length >= 3) {
@@ -773,10 +1075,10 @@ export class IndexDatabase {
 
         if (trigrams.length >= 3) {
           usedTrigramSearch = true;
-          // Use trigram index to find candidates - require 75% match to handle word reordering
-          // (e.g., "PushGameState" vs "GameStatePush" shares ~82% of trigrams)
+          // Use trigram index to find candidates - threshold scales by name length
           const placeholders = trigrams.map(() => '?').join(',');
-          const minMatch = Math.max(3, Math.ceil(trigrams.length * 0.75));
+          const threshold = trigramThreshold(nameLower.length);
+          const minMatch = Math.max(2, Math.ceil(trigrams.length * threshold));
           const trigramSql = `
             SELECT nt.entity_id
             FROM name_trigrams nt
@@ -794,7 +1096,7 @@ export class IndexDatabase {
             if (newIds.length > 0) {
               const idPlaceholders = newIds.map(() => '?').join(',');
               let trigramTypeSql = `
-                SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project
+                SELECT t.id, t.name, t.kind, t.parent, t.line, t.depth, f.path, f.project
                 FROM types t
                 JOIN files f ON t.file_id = f.id
                 WHERE t.id IN (${idPlaceholders})
@@ -819,7 +1121,7 @@ export class IndexDatabase {
         const existingIds = new Set(candidates.map(c => c.id));
         const notInClause = existingIds.size > 0 ? [...existingIds].map(() => '?').join(',') : '-1';
         let substringsSql = `
-          SELECT t.id, t.name, t.kind, t.parent, t.line, f.path, f.project
+          SELECT t.id, t.name, t.kind, t.parent, t.line, t.depth, f.path, f.project
           FROM types t
           JOIN files f ON t.file_id = f.id
           WHERE lower(t.name) LIKE ? AND t.id NOT IN (${notInClause})
@@ -852,31 +1154,66 @@ export class IndexDatabase {
     }
 
     // Split search term into camelCase words for word-level matching
-    const searchWords = name.replace(/^[UAFESI](?=[A-Z])/, '').split(/(?=[A-Z])/).map(w => w.toLowerCase()).filter(w => w.length > 0);
+    const searchWords = splitCamelCase(name);
 
     const scored = candidates.map(row => {
       const candidateLower = row.name.toLowerCase();
       const candidateStripped = row.name.replace(/^[UAFESI]/, '').toLowerCase();
       let score = 0;
+      let matchReason = 'trigram';
 
-      if (candidateLower === nameLower) score = 1.0;
-      else if (candidateStripped === nameStripped) score = 0.98;
-      else if (candidateLower.startsWith(nameLower)) score = 0.95;
-      else if (candidateStripped.startsWith(nameStripped)) score = 0.93;
-      else if (candidateLower.includes(nameLower)) score = 0.85;
-      else if (candidateStripped.includes(nameStripped)) score = 0.80;
+      if (candidateLower === nameLower) { score = 1.0; matchReason = 'exact'; }
+      else if (candidateStripped === nameStripped) { score = 0.98; matchReason = 'exact-stripped'; }
+      else if (candidateStripped === nameLower) { score = 0.97; matchReason = 'exact-stripped'; }
+      else if (candidateLower.startsWith(nameLower)) { score = 0.95; matchReason = 'prefix'; }
+      else if (candidateStripped.startsWith(nameStripped)) { score = 0.93; matchReason = 'prefix-stripped'; }
+      else if (candidateStripped.startsWith(nameLower)) { score = 0.92; matchReason = 'prefix-stripped'; }
+      else if (candidateLower.includes(nameLower)) { score = 0.85; matchReason = 'substring'; }
+      else if (candidateStripped.includes(nameStripped)) { score = 0.80; matchReason = 'substring-stripped'; }
       else if (searchWords.length >= 2) {
-        // Word-level match: check how many search words appear in the candidate
-        const matchedWords = searchWords.filter(w => candidateLower.includes(w));
+        // Word-level match with compound word awareness
+        const candidateWords = splitCamelCase(row.name);
+        const matchedWords = searchWords.filter(sw => candidateWords.some(cw => cw === sw));
         const wordRatio = matchedWords.length / searchWords.length;
-        if (wordRatio === 1) score = 0.7;       // all words match (different order)
-        else if (wordRatio >= 0.66) score = 0.5; // most words match
-        else score = 0.3;                         // few words match (likely false positive)
+
+        // Compound matching: search words that are prefixes of candidate words or vice versa
+        const compoundMatched = searchWords.filter(sw =>
+          candidateWords.some(cw => cw.startsWith(sw) || sw.startsWith(cw))
+        );
+        const compoundRatio = compoundMatched.length / searchWords.length;
+        const bestRatio = Math.max(wordRatio, compoundRatio);
+
+        if (bestRatio === 1) { score = 0.7; matchReason = 'word-match-all'; }
+        else if (bestRatio >= 0.66) { score = 0.5; matchReason = 'word-match-most'; }
+        else if (bestRatio >= 0.5) { score = 0.4; matchReason = 'word-match-some'; }
+        else { score = 0.3; matchReason = 'word-match-few'; }
       } else {
-        score = 0.3; // trigram match but no substring/word match
+        score = 0.3;
+        matchReason = 'trigram';
       }
 
-      return { ...row, score };
+      // Getter/setter awareness: "GetX" matches "X" and vice versa
+      if (score < 0.85) {
+        const queryCore = nameLower.replace(/^(get|set|is|has|can|should)/, '');
+        const candidateCore = candidateLower.replace(/^(get|set|is|has|can|should)/, '');
+        if (queryCore.length > 0 && queryCore === candidateCore && queryCore !== nameLower) {
+          score = Math.max(score, 0.88);
+          matchReason = 'getter-setter';
+        } else if (queryCore.length > 0 && candidateCore.includes(queryCore) && queryCore !== nameLower) {
+          score = Math.max(score, 0.75);
+          matchReason = matchReason === 'trigram' ? 'getter-setter-partial' : matchReason;
+        }
+      }
+
+      // Type kind weighting (tiebreaker)
+      score += KIND_WEIGHT[row.kind] || 0;
+
+      // Inheritance depth: shallower types (closer to root) are more foundational
+      if (row.depth != null) {
+        score += Math.max(0, 0.03 - row.depth * 0.005);
+      }
+
+      return { ...row, score, matchReason };
     });
 
     // Filter out low-quality trigram matches
@@ -1095,17 +1432,30 @@ export class IndexDatabase {
     const startsWithPattern = `%/${filenameLower}%`;
     const containsPattern = `%${filenameLower}%`;
 
+    // Use replace() to normalize backslashes to forward slashes for scoring,
+    // since paths may be stored with either separator depending on the OS.
     let sql = `
       SELECT f.id, f.path, f.project, f.language,
         CASE
-          WHEN lower(f.path) LIKE ? THEN 1.0
-          WHEN lower(f.path) LIKE ? THEN 0.85
+          WHEN replace(lower(f.path), '\\', '/') LIKE ? THEN 1.0
+          WHEN replace(lower(f.path), '\\', '/') LIKE ? THEN 0.85
           WHEN lower(f.path) LIKE ? THEN 0.7
           ELSE 0.5
-        END + (CASE WHEN lower(f.path) LIKE '%.h' THEN 0.01 ELSE 0 END) as score
+        END + (CASE WHEN lower(f.path) LIKE '%.h' THEN 0.01 ELSE 0 END)
+          + (CASE
+              WHEN replace(lower(f.path), '\\', '/') LIKE '%/runtime/%' THEN 0.004
+              WHEN replace(lower(f.path), '\\', '/') LIKE '%/developer/%' THEN 0.002
+              ELSE 0
+            END)
+          + (CASE
+              WHEN replace(lower(f.path), '\\', '/') LIKE '%/public/%' THEN 0.003
+              WHEN replace(lower(f.path), '\\', '/') LIKE '%/classes/%' THEN 0.003
+              WHEN replace(lower(f.path), '\\', '/') LIKE '%/private/%' THEN 0.001
+              ELSE 0
+            END) as score
       FROM files f
       WHERE f.language != 'asset' AND (
-        lower(f.path) LIKE ? OR
+        replace(lower(f.path), '\\', '/') LIKE ? OR
         lower(f.path) LIKE ?
       )
     `;
@@ -1122,7 +1472,7 @@ export class IndexDatabase {
       params.push(language);
     }
 
-    sql += ' ORDER BY score DESC LIMIT ?';
+    sql += ' ORDER BY score DESC, length(f.path) ASC LIMIT ?';
     params.push(maxResults);
 
     const files = this.db.prepare(sql).all(...params);
@@ -1756,6 +2106,73 @@ export class IndexDatabase {
     `).run(cutoff.toISOString());
     return result.changes;
   }
+
+  computeInheritanceDepth() {
+    const allTypes = this.db.prepare('SELECT id, name, parent FROM types').all();
+
+    const nameToIds = new Map();
+    const nameHasParent = new Map(); // track if ANY row for a name has a parent in DB
+    for (const t of allTypes) {
+      if (!nameToIds.has(t.name)) nameToIds.set(t.name, []);
+      nameToIds.get(t.name).push(t.id);
+      if (t.parent && nameToIds.has(t.parent)) {
+        nameHasParent.set(t.name, t.parent);
+      }
+    }
+    // Second pass: recheck parent existence now that all names are loaded
+    for (const t of allTypes) {
+      if (t.parent && nameToIds.has(t.parent)) {
+        nameHasParent.set(t.name, t.parent);
+      }
+    }
+
+    const depths = new Map();
+
+    // Roots: types where NO row has a parent that exists in DB
+    const queue = []; // [name, depth]
+    const visited = new Set();
+    for (const [name, ids] of nameToIds) {
+      if (!nameHasParent.has(name)) {
+        visited.add(name);
+        queue.push([name, 0]);
+        for (const id of ids) {
+          depths.set(id, 0);
+        }
+      }
+    }
+
+    // BFS: children get parent's depth + 1
+    let idx = 0;
+    while (idx < queue.length) {
+      const [parentName, parentDepth] = queue[idx++];
+
+      const children = this.db.prepare(
+        'SELECT DISTINCT name FROM types WHERE parent = ?'
+      ).all(parentName);
+
+      for (const child of children) {
+        if (!visited.has(child.name)) {
+          visited.add(child.name);
+          const childIds = nameToIds.get(child.name) || [];
+          for (const id of childIds) {
+            depths.set(id, parentDepth + 1);
+          }
+          queue.push([child.name, parentDepth + 1]);
+        }
+      }
+    }
+
+    // Batch update
+    const updateStmt = this.db.prepare('UPDATE types SET depth = ? WHERE id = ?');
+    this.db.transaction(() => {
+      for (const [id, depth] of depths) {
+        updateStmt.run(depth, id);
+      }
+    })();
+
+    this.setMetadata('depthComputeNeeded', false);
+    return depths.size;
+  }
 }
 
 // Wrap key methods with slow-query timing and analytics logging
@@ -1781,5 +2198,22 @@ for (const method of methodsToTime) {
       }
     }
     return result;
+  };
+}
+
+// Wrap cacheable methods with LRU+TTL caching on read-only (worker) connections
+const cacheableMethods = ['findTypeByName', 'findMember'];
+for (const method of cacheableMethods) {
+  const original = IndexDatabase.prototype[method];
+  IndexDatabase.prototype[method] = function (...args) {
+    if (this.readOnly) {
+      const cacheKey = `${method}:${JSON.stringify(args)}`;
+      const cached = this.queryCache.get(cacheKey);
+      if (cached !== undefined) return cached;
+      const result = original.apply(this, args);
+      this.queryCache.set(cacheKey, result);
+      return result;
+    }
+    return original.apply(this, args);
   };
 }
