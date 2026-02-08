@@ -1,3 +1,5 @@
+import { Agent } from 'undici';
+
 const LANGUAGE_EXTENSIONS = {
   angelscript: '\\.as$',
   cpp: '\\.(cpp|h|hpp|cc|inl)$',
@@ -14,6 +16,11 @@ export class ZoektClient {
   constructor(port, options = {}) {
     this.baseUrl = `http://127.0.0.1:${port}`;
     this.timeoutMs = options.timeoutMs || 10000;
+    this.dispatcher = new Agent({
+      keepAliveTimeout: 30_000,
+      connections: 10,
+      pipelining: 1
+    });
   }
 
   async search(pattern, options = {}) {
@@ -96,7 +103,8 @@ export class ZoektClient {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: controller.signal
+        signal: controller.signal,
+        dispatcher: this.dispatcher
       });
     } catch (err) {
       if (err.name === 'AbortError') {
