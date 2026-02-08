@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync, unlinkSync, existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { inflateSync } from 'zlib';
+import tarStream from 'tar-stream';
 
 export class ZoektMirror {
   constructor(mirrorDir) {
@@ -23,23 +24,7 @@ export class ZoektMirror {
 
     mkdirSync(this.mirrorDir, { recursive: true });
 
-    // Compute common path prefix across ALL projects (one sample per project + extras)
-    const sample = database.db.prepare(
-      `SELECT path FROM (
-        SELECT path, ROW_NUMBER() OVER (PARTITION BY project ORDER BY ROWID) as rn
-        FROM files WHERE language NOT IN ('content', 'asset')
-      ) WHERE rn <= 5`
-    ).all().map(r => r.path.replace(/\\/g, '/'));
-
-    if (sample.length > 0) {
-      this.pathPrefix = sample[0];
-      for (const p of sample) {
-        while (this.pathPrefix && !p.startsWith(this.pathPrefix)) {
-          this.pathPrefix = this.pathPrefix.slice(0, this.pathPrefix.lastIndexOf('/'));
-        }
-      }
-      if (this.pathPrefix && !this.pathPrefix.endsWith('/')) this.pathPrefix += '/';
-    }
+    this._computePathPrefix(database);
 
     // Fetch all source file content from SQLite
     const rows = database.db.prepare(
@@ -92,6 +77,103 @@ export class ZoektMirror {
     return written;
   }
 
+  /**
+   * Stream all mirror files as a tar archive to a writable stream.
+   * Used for direct-to-WSL bootstrap, skipping the Windows filesystem.
+   */
+  async bootstrapToStream(database, outputStream, onProgress = null) {
+    const startMs = performance.now();
+    console.log('[ZoektMirror] Streaming bootstrap to tar...');
+
+    // Compute path prefix (same logic as bootstrapFromDatabase)
+    this._computePathPrefix(database);
+
+    const rows = database.db.prepare(
+      `SELECT fc.content, f.path, f.language FROM file_content fc
+       JOIN files f ON f.id = fc.file_id
+       WHERE f.language NOT IN ('content')`
+    ).all();
+
+    const total = rows.length;
+    let written = 0;
+    let assetCount = 0;
+    let errors = 0;
+
+    const pack = tarStream.pack();
+    pack.pipe(outputStream);
+
+    for (const row of rows) {
+      try {
+        const content = inflateSync(row.content);
+        const isAsset = row.language === 'asset';
+        const relativePath = isAsset
+          ? this._toAssetMirrorPath(row.path)
+          : this._toRelativePath(row.path);
+
+        // Write tar entry — use a promise to handle backpressure
+        await new Promise((resolve, reject) => {
+          const entry = pack.entry({ name: relativePath, size: content.length }, (err) => {
+            if (err) reject(err);
+            else resolve();
+          });
+          entry.end(content);
+        });
+
+        written++;
+        if (isAsset) assetCount++;
+
+        if (onProgress && written % 5000 === 0) {
+          const elapsed = (performance.now() - startMs) / 1000;
+          const rate = written / elapsed;
+          onProgress({ written, total, rate: Math.round(rate), etaSeconds: Math.ceil((total - written) / rate) });
+        }
+      } catch (err) {
+        errors++;
+        if (errors <= 5) {
+          console.warn(`[ZoektMirror] Error streaming ${row.path}: ${err.message}`);
+        }
+      }
+    }
+
+    // Finalize the tar archive
+    pack.finalize();
+
+    // Write marker file to Windows mirror dir (for integrity checks)
+    mkdirSync(this.mirrorDir, { recursive: true });
+    writeFileSync(this.markerPath, JSON.stringify({
+      timestamp: new Date().toISOString(),
+      fileCount: written,
+      assetCount,
+      pathPrefix: this.pathPrefix
+    }));
+
+    const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
+    console.log(`[ZoektMirror] Tar stream complete: ${written} files (${assetCount} assets), ${errors} errors (${durationS}s)`);
+    return written;
+  }
+
+  /**
+   * Extract common path prefix from database samples.
+   */
+  _computePathPrefix(database) {
+    const sample = database.db.prepare(
+      `SELECT path FROM (
+        SELECT path, ROW_NUMBER() OVER (PARTITION BY project ORDER BY ROWID) as rn
+        FROM files WHERE language NOT IN ('content', 'asset')
+      ) WHERE rn <= 5`
+    ).all().map(r => r.path.replace(/\\/g, '/'));
+
+    if (sample.length > 0) {
+      this.pathPrefix = sample[0];
+      for (const p of sample) {
+        while (this.pathPrefix && !p.startsWith(this.pathPrefix)) {
+          this.pathPrefix = this.pathPrefix.slice(0, this.pathPrefix.lastIndexOf('/'));
+        }
+      }
+      if (this.pathPrefix && !this.pathPrefix.endsWith('/')) this.pathPrefix += '/';
+    }
+  }
+
   verifyIntegrity(database) {
     if (!this.isReady()) {
       return { valid: false, reason: 'no marker file' };
@@ -124,22 +206,7 @@ export class ZoektMirror {
       } catch {}
     }
 
-    const sample = database.db.prepare(
-      `SELECT path FROM (
-        SELECT path, ROW_NUMBER() OVER (PARTITION BY project ORDER BY ROWID) as rn
-        FROM files WHERE language NOT IN ('content', 'asset')
-      ) WHERE rn <= 5`
-    ).all().map(r => r.path.replace(/\\/g, '/'));
-
-    if (sample.length > 0) {
-      this.pathPrefix = sample[0];
-      for (const p of sample) {
-        while (this.pathPrefix && !p.startsWith(this.pathPrefix)) {
-          this.pathPrefix = this.pathPrefix.slice(0, this.pathPrefix.lastIndexOf('/'));
-        }
-      }
-      if (this.pathPrefix && !this.pathPrefix.endsWith('/')) this.pathPrefix += '/';
-    }
+    this._computePathPrefix(database);
   }
 
   updateFile(filePath, content) {

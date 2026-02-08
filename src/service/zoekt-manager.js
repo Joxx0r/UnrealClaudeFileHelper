@@ -1,5 +1,5 @@
 import { spawn, execSync, spawnSync } from 'child_process';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync } from 'fs';
 import { join } from 'path';
 
 export class ZoektManager {
@@ -27,6 +27,8 @@ export class ZoektManager {
     this.zoektIndexPath = null;
     this.zoektWebPath = null;
     this.useWsl = false; // Whether to run Zoekt via WSL2
+    this._indexingActive = false;
+    this._pendingProjects = new Set();
   }
 
   /**
@@ -387,10 +389,114 @@ export class ZoektManager {
     return this._effectiveMirrorPath;
   }
 
+  /**
+   * Discover project subdirectories in the mirror root.
+   * Each subdirectory becomes its own Zoekt shard.
+   */
+  _listMirrorProjects(effectiveMirrorPath) {
+    if (this.useWsl) {
+      try {
+        const output = execSync(
+          `wsl -d Ubuntu -- bash -c "for d in '${effectiveMirrorPath}'/*/; do [ -d \\\"\\$d\\\" ] && basename \\\"\\$d\\\"; done 2>/dev/null"`,
+          { encoding: 'utf-8', timeout: 10000 }
+        ).trim();
+        return output.split('\n').filter(Boolean);
+      } catch { return []; }
+    }
+
+    try {
+      return readdirSync(effectiveMirrorPath, { withFileTypes: true })
+        .filter(d => d.isDirectory() && !d.name.startsWith('.'))
+        .map(d => d.name);
+    } catch { return []; }
+  }
+
+  /**
+   * Index a single project's directory into its own Zoekt shard.
+   * Uses -incremental to skip unchanged files and -shard_prefix for per-project shards.
+   */
+  async _runIndexForProject(projectName, effectiveMirrorPath) {
+    return new Promise((resolve, reject) => {
+      const startMs = performance.now();
+      const projectDir = `${effectiveMirrorPath}/${projectName}`;
+      const args = [
+        '-index', this._getIndexDirArg(),
+        '-incremental',
+        '-shard_prefix', projectName,
+        '-parallelism', String(Math.max(1, Math.floor(this.parallelism / 2))),
+        '-file_limit', String(this.fileLimitBytes),
+        projectDir
+      ];
+
+      const proc = this._spawn(this.zoektIndexPath, args);
+      let stderr = '';
+      proc.stdout.on('data', (data) => {
+        const line = data.toString().trim();
+        if (line) console.log(`[zoekt-index:${projectName}] ${line}`);
+      });
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+        const line = data.toString().trim();
+        if (line) console.log(`[zoekt-index:${projectName}] ${line}`);
+      });
+
+      proc.on('exit', (code) => {
+        const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
+        if (code === 0) {
+          resolve({ project: projectName, durationS: parseFloat(durationS) });
+        } else {
+          const msg = `Index ${projectName} failed (code=${code}, ${durationS}s): ${stderr.slice(0, 200)}`;
+          console.error(`[ZoektManager] ${msg}`);
+          reject(new Error(msg));
+        }
+      });
+
+      proc.on('error', reject);
+    });
+  }
+
+  /**
+   * Index specific projects (scoped reindex).
+   * Only reindexes the given project directories instead of the entire mirror.
+   */
+  async reindexProjects(projectNames) {
+    if (this._indexingActive) {
+      console.log('[ZoektManager] Index already running, skipping...');
+      return;
+    }
+
+    const effectiveMirrorPath = this._effectiveMirrorPath;
+    if (!effectiveMirrorPath) {
+      console.warn('[ZoektManager] No effective mirror path, cannot reindex');
+      return;
+    }
+
+    this._indexingActive = true;
+    const startMs = performance.now();
+    const names = [...projectNames];
+    console.log(`[ZoektManager] Scoped reindex: ${names.join(', ')}...`);
+
+    try {
+      const results = await Promise.allSettled(
+        names.map(p => this._runIndexForProject(p, effectiveMirrorPath))
+      );
+
+      const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
+      const succeeded = results.filter(r => r.status === 'fulfilled').length;
+      const failed = results.filter(r => r.status === 'rejected').length;
+
+      this.lastIndexCompleteTime = new Date().toISOString();
+      this.lastIndexDurationS = parseFloat(durationS);
+      console.log(`[ZoektManager] Scoped reindex complete: ${succeeded} OK, ${failed} failed (${durationS}s)`);
+    } finally {
+      this._indexingActive = false;
+    }
+  }
+
   async runIndex(mirrorRoot) {
     this.mirrorRoot = mirrorRoot;
 
-    if (this.indexProcess) {
+    if (this._indexingActive || this.indexProcess) {
       console.log('[ZoektManager] Index already running, skipping...');
       return;
     }
@@ -398,6 +504,17 @@ export class ZoektManager {
     // Use pre-synced path if available, otherwise sync now
     const effectiveMirrorPath = this._effectiveMirrorPath || await this._syncMirrorToWsl(mirrorRoot);
 
+    // Discover project directories for per-project shard indexing
+    const projects = this._listMirrorProjects(effectiveMirrorPath);
+
+    if (projects.length > 0) {
+      console.log(`[ZoektManager] Starting per-project index (${projects.length} projects)...`);
+      await this.reindexProjects(projects);
+      return;
+    }
+
+    // Fallback: single monolithic index (no project directories found)
+    this._indexingActive = true;
     return new Promise((resolve, reject) => {
       const startMs = performance.now();
       const args = [
@@ -407,7 +524,7 @@ export class ZoektManager {
         effectiveMirrorPath
       ];
 
-      console.log(`[ZoektManager] Starting index of ${mirrorRoot}...`);
+      console.log(`[ZoektManager] Starting full index of ${mirrorRoot}...`);
       this.indexProcess = this._spawn(this.zoektIndexPath, args);
 
       let stderr = '';
@@ -423,6 +540,7 @@ export class ZoektManager {
 
       this.indexProcess.on('exit', (code) => {
         this.indexProcess = null;
+        this._indexingActive = false;
         const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
 
         if (code === 0) {
@@ -439,6 +557,7 @@ export class ZoektManager {
 
       this.indexProcess.on('error', (err) => {
         this.indexProcess = null;
+        this._indexingActive = false;
         reject(err);
       });
     });
@@ -474,9 +593,13 @@ export class ZoektManager {
     } catch {}
   }
 
-  triggerReindex(changeCount = 1) {
+  triggerReindex(changeCount = 1, affectedProjects = null) {
     if (!this.mirrorRoot) return;
     this._pendingChangeCount = (this._pendingChangeCount || 0) + changeCount;
+
+    if (affectedProjects) {
+      for (const p of affectedProjects) this._pendingProjects.add(p);
+    }
 
     if (this.reindexTimer) {
       clearTimeout(this.reindexTimer);
@@ -487,11 +610,19 @@ export class ZoektManager {
 
     this.reindexTimer = setTimeout(async () => {
       const count = this._pendingChangeCount;
+      const projects = new Set(this._pendingProjects);
       this._pendingChangeCount = 0;
+      this._pendingProjects.clear();
       this.reindexTimer = null;
-      console.log(`[ZoektManager] Reindexing after ${count} change(s)...`);
+
       try {
-        await this.runIndex(this.mirrorRoot);
+        if (projects.size > 0) {
+          console.log(`[ZoektManager] Scoped reindex after ${count} change(s) in: ${[...projects].join(', ')}...`);
+          await this.reindexProjects(projects);
+        } else {
+          console.log(`[ZoektManager] Full reindex after ${count} change(s)...`);
+          await this.runIndex(this.mirrorRoot);
+        }
       } catch (err) {
         console.error(`[ZoektManager] Reindex failed: ${err.message}`);
       }
@@ -510,12 +641,61 @@ export class ZoektManager {
     return {
       available: this.isAvailable(),
       port: this.webPort,
-      indexing: this.indexProcess !== null,
+      indexing: this._indexingActive || this.indexProcess !== null,
       lastIndexTime: this.lastIndexCompleteTime,
       lastIndexDurationS: this.lastIndexDurationS,
       restartAttempts: this.restartAttempts,
       useWsl: this.useWsl
     };
+  }
+
+  /**
+   * Bootstrap mirror directly to WSL via tar pipe, skipping the Windows filesystem.
+   * Streams tar data from zoektMirror.bootstrapToStream() into WSL tar extraction.
+   */
+  async bootstrapDirect(database, zoektMirror, onProgress = null) {
+    if (!this.useWsl || !this.wslMirrorDir) {
+      throw new Error('bootstrapDirect requires WSL mode');
+    }
+
+    const startMs = performance.now();
+    console.log('[ZoektManager] Direct-to-WSL bootstrap via tar stream...');
+
+    return new Promise((resolve, reject) => {
+      const tarCmd = `mkdir -p '${this.wslMirrorDir}' && cd '${this.wslMirrorDir}' && tar xf -`;
+      const proc = spawn('wsl', ['-d', 'Ubuntu', '--', 'bash', '-c', tarCmd], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+
+      let stderr = '';
+      proc.stderr.on('data', d => { stderr += d.toString(); });
+
+      proc.on('exit', (code) => {
+        const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
+        if (code === 0) {
+          this._effectiveMirrorPath = this.wslMirrorDir;
+          console.log(`[ZoektManager] Direct bootstrap complete (${durationS}s)`);
+          resolve();
+        } else {
+          const msg = `Direct bootstrap failed (code=${code}, ${durationS}s): ${stderr.slice(0, 200)}`;
+          console.error(`[ZoektManager] ${msg}`);
+          reject(new Error(msg));
+        }
+      });
+
+      proc.on('error', reject);
+
+      // Stream tar entries from the database directly into WSL
+      zoektMirror.bootstrapToStream(database, proc.stdin, onProgress)
+        .then(() => {
+          proc.stdin.end();
+        })
+        .catch(err => {
+          proc.stdin.end();
+          reject(err);
+        });
+    });
   }
 
   async stop() {

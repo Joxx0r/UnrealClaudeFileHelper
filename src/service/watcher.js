@@ -103,6 +103,7 @@ export class FileWatcher {
     let added = 0;
     let changed = 0;
     let deleted = 0;
+    const affectedProjects = new Set();
 
     // Phase 1: Handle deletes immediately (no I/O needed)
     const ioTasks = [];
@@ -114,9 +115,15 @@ export class FileWatcher {
 
       if (eventType === 'unlink') {
         if (language === 'content') {
-          if (this.database.deleteAsset(filePath)) deleted++;
+          if (this.database.deleteAsset(filePath)) {
+            deleted++;
+            affectedProjects.add('_assets');
+          }
         } else {
-          if (this.database.deleteFile(filePath)) deleted++;
+          if (this.database.deleteFile(filePath)) {
+            deleted++;
+            if (project) affectedProjects.add(project.name);
+          }
           // Remove from Zoekt mirror (Windows + WSL)
           if (this.zoektMirror) {
             const relativePath = this.zoektMirror._toRelativePath(filePath);
@@ -148,6 +155,12 @@ export class FileWatcher {
         this._writeToDatabase(result);
         if (result.eventType === 'add') added++;
         else changed++;
+        // Track affected project for scoped Zoekt reindexing
+        if (result.type === 'asset') {
+          affectedProjects.add('_assets');
+        } else if (result.project) {
+          affectedProjects.add(result.project.name);
+        }
       } catch (err) {
         console.error(`Error writing ${result.filePath}:`, err.message);
       }
@@ -158,9 +171,9 @@ export class FileWatcher {
       console.log(`[Watcher] +${added} ~${changed} -${deleted} (${updates.size} files) — ${ms}ms`);
       this.onUpdate({ added, changed, deleted });
 
-      // Trigger Zoekt re-indexing (adaptive debounce based on change volume)
+      // Trigger scoped Zoekt re-indexing (only affected projects)
       if (this.zoektManager) {
-        this.zoektManager.triggerReindex(added + changed + deleted);
+        this.zoektManager.triggerReindex(added + changed + deleted, affectedProjects);
       }
     }
   }
