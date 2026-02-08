@@ -242,7 +242,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   // Refresh stats every 30 seconds in the background
   refreshStatsCache();
-  setInterval(refreshStatsCache, 30000);
+  app._statsInterval = setInterval(refreshStatsCache, 30000);
 
   app.get('/stats', (req, res) => {
     if (statsCache) {
