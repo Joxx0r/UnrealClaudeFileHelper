@@ -35,10 +35,10 @@ export class ZoektClient {
   async searchAssets(pattern, options = {}) {
     const { project, caseSensitive = true, maxResults = 20 } = options;
 
-    // Asset query: only _assets/ paths, no language filter, no context lines
+    // Asset query: only _assets/ paths or repo, no language filter, no context lines
     const parts = [caseSensitive ? 'case:yes' : 'case:no'];
     if (project) parts.push(`file:${project}/`);
-    parts.push('file:^_assets/');
+    parts.push('(file:^_assets/ or repo:_assets)');
     if (this._hasRegexMeta(pattern)) {
       parts.push(`regex:${pattern}`);
     } else {
@@ -49,6 +49,8 @@ export class ZoektClient {
 
     // Map asset paths back to original content paths
     // Mirror adds .uasset extension to avoid file/directory collisions — strip it
+    // Per-project shard: file is "Game/Discovery/..." (no _assets/ prefix)
+    // Monolithic shard: file is "_assets/Game/Discovery/..." (with _assets/ prefix)
     result.results = result.results.map(r => {
       let file = '/' + r.file.replace(/^_assets\//, '');
       file = file.replace(/\.uasset$/, '');
@@ -91,8 +93,9 @@ export class ZoektClient {
       parts.push(`file:${LANGUAGE_EXTENSIONS[language]}`);
     }
     parts.push('-file:^_assets/');
+    parts.push('-repo:_assets');
     if (project) {
-      parts.push(`file:${project}/`);
+      parts.push(`(file:${project}/ or repo:${project})`);
     }
 
     return this._executeQuery(parts.join(' '), maxResults, 0);
@@ -159,15 +162,17 @@ export class ZoektClient {
       parts.push(`file:${LANGUAGE_EXTENSIONS[language]}`);
     }
 
-    // Exclude asset files from source searches
+    // Exclude asset files from source searches.
+    // Supports both monolithic shards (file path prefix) and per-project shards (repo name).
     if (excludeAssets) {
       parts.push('-file:^_assets/');
+      parts.push('-repo:_assets');
     }
 
-    // Project filter via path prefix
+    // Project filter — supports both monolithic (file:prefix) and per-project shards (repo:name).
+    // Use OR so it matches either shard type.
     if (project) {
-      // Project name appears as a path component in the mirror directory
-      parts.push(`file:${project}/`);
+      parts.push(`(file:${project}/ or repo:${project})`);
     }
 
     // The search pattern itself — use regex if it contains regex metacharacters
@@ -207,7 +212,13 @@ export class ZoektClient {
     const stats = data.Result?.Stats || data.Stats || {};
 
     for (const file of files) {
-      const filePath = file.FileName || '';
+      // Per-project shards: FileName is relative to project dir (e.g., "Script/Camera/Aim.as").
+      // Use Repository field (e.g., "Discovery") to reconstruct the full path with project prefix.
+      let filePath = file.FileName || '';
+      const repo = file.Repository || '';
+      if (repo && !filePath.startsWith(repo + '/')) {
+        filePath = repo + '/' + filePath;
+      }
       const fileProject = this._inferProject(filePath);
       const fileLanguage = this._inferLanguage(filePath);
       matchedFiles++;
