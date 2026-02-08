@@ -11,6 +11,9 @@ import { createApi } from './api.js';
 import { FileWatcher } from './watcher.js';
 import { BackgroundIndexer } from './background-indexer.js';
 import { QueryPool } from './query-pool.js';
+import { ZoektMirror } from './zoekt-mirror.js';
+import { ZoektManager } from './zoekt-manager.js';
+import { ZoektClient } from './zoekt-client.js';
 import { parseFile } from '../parser.js';
 import os from 'os';
 
@@ -48,6 +51,9 @@ class UnrealIndexService {
     this.watcher = null;
     this.server = null;
     this.backgroundIndexer = null;
+    this.zoektMirror = null;
+    this.zoektManager = null;
+    this.zoektClient = null;
   }
 
   async loadConfig() {
@@ -127,7 +133,6 @@ class UnrealIndexService {
     console.log(`[Startup] database open: ${(performance.now() - t).toFixed(0)}ms`);
 
     // Spawn query worker pool early (before chokidar grows RSS)
-    t = performance.now();
     const workerCount = Math.min(5, Math.max(1, os.cpus().length - 1));
     t = performance.now();
     this.queryPool = new QueryPool(dbPath, workerCount);
@@ -157,7 +162,86 @@ class UnrealIndexService {
       console.log(`[Startup] config sync index: ${(performance.now() - t).toFixed(0)}ms`);
     }
 
-    const app = createApi(this.database, this, this.queryPool);
+    // Zoekt initialization (mirror + process manager + client)
+    const zoektConfig = this.config.zoekt || {};
+    if (zoektConfig.enabled !== false) {
+      t = performance.now();
+      try {
+        const dataDir = join(__dirname, '..', '..', 'data');
+        const mirrorDir = zoektConfig.mirrorDir
+          ? join(__dirname, '..', '..', zoektConfig.mirrorDir)
+          : join(dataDir, 'zoekt-mirror');
+        const indexDir = zoektConfig.indexDir
+          ? join(__dirname, '..', '..', zoektConfig.indexDir)
+          : join(dataDir, 'zoekt-index');
+
+        this.zoektMirror = new ZoektMirror(mirrorDir);
+
+        const mirrorProgress = (p) => {
+          console.log(`[Startup] Mirror: ${p.written}/${p.total} (${Math.round(p.written / p.total * 100)}%) — ETA ${p.etaSeconds}s`);
+        };
+
+        if (!this.zoektMirror.isReady()) {
+          this.zoektMirror.bootstrapFromDatabase(this.database, mirrorProgress);
+        } else {
+          this.zoektMirror.loadPrefix(this.database);
+          // Verify mirror integrity against database
+          const check = this.zoektMirror.verifyIntegrity(this.database);
+          if (!check.valid) {
+            console.warn(`[Startup] Mirror integrity check failed: ${check.reason}, rebuilding...`);
+            this.zoektMirror.bootstrapFromDatabase(this.database, mirrorProgress);
+          } else {
+            console.log(`[Startup] Mirror OK (${check.mirrorCount} files)`);
+          }
+        }
+
+        this.zoektManager = new ZoektManager({
+          indexDir,
+          webPort: zoektConfig.webPort || 6070,
+          parallelism: zoektConfig.parallelism || 4,
+          fileLimitBytes: zoektConfig.fileLimitBytes || 524288,
+          reindexDebounceMs: zoektConfig.reindexDebounceMs || 5000,
+          zoektBin: zoektConfig.zoektBin || null
+        });
+
+        // Init → sync → start: sync must complete BEFORE webserver starts,
+        // as concurrent WSL processes cause zoekt-webserver to exit
+        if (!this.zoektManager.init()) {
+          throw new Error('Zoekt binaries not found');
+        }
+        if (process.env.SKIP_SYNC !== '1') {
+          await this.zoektManager.syncMirror(this.zoektMirror.getMirrorRoot());
+        } else {
+          // Set effective mirror path to WSL-native dir so runIndex skips sync too
+          this.zoektManager._effectiveMirrorPath = this.zoektManager.wslMirrorDir || this.zoektMirror.getMirrorRoot();
+          this.zoektManager.mirrorRoot = this.zoektMirror.getMirrorRoot();
+          console.log('[Startup] WSL mirror sync skipped (SKIP_SYNC=1)');
+        }
+        const started = await this.zoektManager.start();
+        if (started) {
+          this.zoektClient = new ZoektClient(this.zoektManager.getPort(), {
+            timeoutMs: zoektConfig.searchTimeoutMs || 10000
+          });
+          console.log(`[Startup] Zoekt webserver ready (${((performance.now() - t) / 1000).toFixed(1)}s), index build running in background...`);
+          // Run index in background — existing shards are already usable
+          this.zoektManager.runIndex(this.zoektMirror.getMirrorRoot()).then(() => {
+            console.log('[Startup] Zoekt index build complete');
+          }).catch(indexErr => {
+            console.warn(`[Startup] Zoekt index failed (using existing shards): ${indexErr.message}`);
+          });
+        } else {
+          console.warn('[Startup] Zoekt webserver failed to start, grep will use trigram fallback');
+        }
+      } catch (err) {
+        console.warn(`[Startup] Zoekt initialization failed: ${err.message}`);
+        console.warn('[Startup] Grep will use trigram fallback');
+      }
+    }
+
+    const app = createApi(this.database, this, this.queryPool, {
+      zoektClient: this.zoektClient,
+      zoektManager: this.zoektManager
+    });
 
     this.server = app.listen(port, host, () => {
       console.log(`[Startup] server listening at http://${host}:${port} (${((performance.now() - totalStart) / 1000).toFixed(1)}s total)`);
@@ -165,6 +249,8 @@ class UnrealIndexService {
 
     this.watcher = new FileWatcher(this.config, this.database, {
       debounceMs: this.config.watcher.debounceMs,
+      zoektMirror: this.zoektMirror,
+      zoektManager: this.zoektManager,
       onUpdate: (stats) => {
         this.database.setMetadata('lastUpdate', {
           timestamp: new Date().toISOString(),
@@ -172,7 +258,15 @@ class UnrealIndexService {
         });
       }
     });
-    this.watcher.start();
+    // Defer watcher start: chokidar's directory enumeration on slow P4 drives
+    // blocks the event loop for 10-20s. Delay so initial requests aren't affected.
+    if (process.env.NO_WATCHER !== '1') {
+      setTimeout(() => {
+        this.watcher.start();
+      }, 60000);
+    } else {
+      console.log('[Startup] Watcher disabled (NO_WATCHER=1)');
+    }
 
     if (cppEmpty) {
       console.log('Starting C++ indexing in background...');
@@ -559,6 +653,10 @@ class UnrealIndexService {
 
   shutdown() {
     console.log('Shutting down...');
+
+    if (this.zoektManager) {
+      this.zoektManager.stop();
+    }
 
     if (this.queryPool) {
       this.queryPool.shutdown();

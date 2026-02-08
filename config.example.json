@@ -48,5 +48,15 @@
   },
   "watcher": {
     "debounceMs": 100
+  },
+  "zoekt": {
+    "enabled": true,
+    "webPort": 6070,
+    "indexDir": "./data/zoekt-index",
+    "mirrorDir": "./data/zoekt-mirror",
+    "parallelism": 4,
+    "fileLimitBytes": 524288,
+    "reindexDebounceMs": 5000,
+    "searchTimeoutMs": 3000
   }
 }

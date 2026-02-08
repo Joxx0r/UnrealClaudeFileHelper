@@ -5,7 +5,7 @@ import { existsSync, readdirSync, unlinkSync } from 'fs';
 import { writeFile, readFile } from 'fs/promises';
 import { join, dirname, basename, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import http from 'http';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -494,6 +494,10 @@ async function actionFullSetup() {
         await saveConfig(config);
         clearDatabase();
         p.log.success('Config saved.');
+
+        // Auto-check Zoekt prerequisites so users know what to expect
+        await actionCheckPrerequisites();
+
         return config;
       }
     }
@@ -537,6 +541,97 @@ function clearDatabase() {
       p.log.warn(`Could not delete database: ${err.message}`);
     }
   }
+}
+
+// ── Prerequisites check ───────────────────────────────────
+
+function checkPrerequisites() {
+  const results = { go: false, zoekt: false, wsl: false, goVersion: null, zoektLocation: null };
+
+  // Check Go
+  try {
+    const goVer = execSync('go version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }).trim();
+    results.go = true;
+    results.goVersion = goVer;
+  } catch {}
+
+  // Check Zoekt binaries — native PATH
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  try {
+    const which = process.platform === 'win32' ? 'where' : 'which';
+    const found = execSync(`${which} zoekt-index`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 }).trim().split('\n')[0].trim();
+    if (found) { results.zoekt = true; results.zoektLocation = 'PATH'; }
+  } catch {}
+
+  // Check GOPATH/bin
+  if (!results.zoekt) {
+    const gopath = process.env.GOPATH || join(process.env.USERPROFILE || process.env.HOME || '', 'go');
+    const binPath = join(gopath, 'bin', `zoekt-index${ext}`);
+    if (existsSync(binPath)) {
+      results.zoekt = true;
+      results.zoektLocation = join(gopath, 'bin');
+    }
+  }
+
+  // Check WSL (Windows only, fallback for Zoekt)
+  if (process.platform === 'win32' && !results.zoekt) {
+    try {
+      const wslResult = execSync(
+        'wsl -d Ubuntu -- bash -c "export PATH=/usr/local/go/bin:$HOME/go/bin:$PATH && which zoekt-index 2>/dev/null"',
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 }
+      ).trim();
+      if (wslResult) {
+        results.wsl = true;
+        results.zoekt = true;
+        results.zoektLocation = 'WSL2 (Ubuntu)';
+      }
+    } catch {}
+  }
+
+  return results;
+}
+
+async function actionCheckPrerequisites() {
+  const s = p.spinner();
+  s.start('Checking prerequisites...');
+  const prereqs = checkPrerequisites();
+  s.stop('Prerequisites checked.');
+
+  const lines = [];
+
+  // Go
+  if (prereqs.go) {
+    lines.push(`  Go:    OK (${prereqs.goVersion})`);
+  } else {
+    lines.push('  Go:    NOT FOUND');
+    lines.push('         Install from https://go.dev/dl/');
+  }
+
+  // Zoekt
+  if (prereqs.zoekt) {
+    lines.push(`  Zoekt: OK (${prereqs.zoektLocation})`);
+  } else if (prereqs.go) {
+    lines.push('  Zoekt: NOT FOUND');
+    lines.push('         Run: go install github.com/sourcegraph/zoekt/cmd/...@latest');
+  } else if (process.platform === 'win32') {
+    lines.push('  Zoekt: NOT FOUND');
+    lines.push('         Option 1: Install Go + run: go install github.com/sourcegraph/zoekt/cmd/...@latest');
+    lines.push('         Option 2: Install WSL2 (wsl --install -d Ubuntu), then install Go + Zoekt inside WSL');
+  } else {
+    lines.push('  Zoekt: NOT FOUND (install Go first)');
+  }
+
+  // Summary
+  if (prereqs.zoekt) {
+    lines.push('');
+    lines.push('  Zoekt code search will be enabled for fast /grep queries.');
+  } else {
+    lines.push('');
+    lines.push('  Without Zoekt, /grep will use slower SQLite trigram search.');
+  }
+
+  p.note(lines.join('\n'), 'Prerequisites');
+  return prereqs;
 }
 
 // ── Main menu loop ─────────────────────────────────────────
@@ -589,6 +684,7 @@ async function main() {
               hint: running ? `running on port ${port}` : 'launch the index service',
             }]
           : []),
+        { value: 'prereqs', label: 'Check prerequisites', hint: 'Go, Zoekt, WSL status' },
         { value: 'exit', label: 'Exit' },
       ],
     }));
@@ -630,6 +726,10 @@ async function main() {
         } else {
           await actionStartService(port);
         }
+        break;
+
+      case 'prereqs':
+        await actionCheckPrerequisites();
         break;
 
       case 'exit':
