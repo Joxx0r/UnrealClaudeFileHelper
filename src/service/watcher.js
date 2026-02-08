@@ -103,6 +103,7 @@ export class FileWatcher {
     let added = 0;
     let changed = 0;
     let deleted = 0;
+    let mirrorErrors = 0;
     const affectedProjects = new Set();
 
     // Phase 1: Handle deletes immediately (no I/O needed)
@@ -124,12 +125,13 @@ export class FileWatcher {
             deleted++;
             if (project) affectedProjects.add(project.name);
           }
-          // Remove from Zoekt mirror (Windows + WSL)
-          if (this.zoektMirror) {
-            const relativePath = this.zoektMirror._toRelativePath(filePath);
-            this.zoektMirror.deleteFile(filePath);
-            if (this.zoektManager) {
+          // Remove from Zoekt WSL mirror
+          if (this.zoektMirror && this.zoektManager) {
+            try {
+              const relativePath = this.zoektMirror._toRelativePath(filePath);
               this.zoektManager.deleteWslMirrorFile(relativePath);
+            } catch (err) {
+              mirrorErrors++;
             }
           }
         }
@@ -168,7 +170,8 @@ export class FileWatcher {
 
     if (added > 0 || changed > 0 || deleted > 0) {
       const ms = (performance.now() - watcherStart).toFixed(1);
-      console.log(`[Watcher] +${added} ~${changed} -${deleted} (${updates.size} files) — ${ms}ms`);
+      const mirrorSuffix = mirrorErrors > 0 ? `, ${mirrorErrors} mirror error(s)` : '';
+      console.log(`[Watcher] +${added} ~${changed} -${deleted} (${updates.size} files${mirrorSuffix}) — ${ms}ms`);
       this.onUpdate({ added, changed, deleted });
 
       // Trigger scoped Zoekt re-indexing (only affected projects)
@@ -311,12 +314,13 @@ export class FileWatcher {
         const hash = contentHash(fileContent);
         this.database.upsertFileContent(fileId, compressed, hash);
 
-        // Update Zoekt mirror with the raw file content (Windows + WSL)
-        if (this.zoektMirror) {
-          this.zoektMirror.updateFile(filePath, fileContent);
-          if (this.zoektManager) {
+        // Update Zoekt WSL mirror
+        if (this.zoektMirror && this.zoektManager) {
+          try {
             const relativePath = this.zoektMirror._toRelativePath(filePath);
             this.zoektManager.updateWslMirrorFile(relativePath, fileContent);
+          } catch (err) {
+            // Tracked via mirrorErrors counter in processPendingUpdates
           }
         }
       }

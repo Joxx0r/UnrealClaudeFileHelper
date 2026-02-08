@@ -208,39 +208,16 @@ class UnrealIndexService {
         }
 
         if (needsBootstrap || mirrorIntegrityFailed) {
-          // First-time or rebuild: try direct-to-WSL bootstrap (skips Windows mirror)
-          if (this.zoektManager.useWsl && this.zoektManager.wslMirrorDir) {
-            console.log('[Startup] Direct-to-WSL bootstrap (skipping Windows mirror)...');
-            await this.zoektManager.bootstrapDirect(this.database, this.zoektMirror, mirrorProgress);
-            this.zoektManager.mirrorRoot = this.zoektMirror.getMirrorRoot();
-
-            // Populate Windows mirror in background (needed for watcher incremental updates)
-            setTimeout(() => {
-              console.log('[Startup] Background: populating Windows mirror for watcher...');
-              try {
-                this.zoektMirror.bootstrapFromDatabase(this.database, (p) => {
-                  if (p.written % 50000 === 0) {
-                    console.log(`[Startup] Background mirror: ${p.written}/${p.total}`);
-                  }
-                });
-                console.log('[Startup] Background mirror population complete');
-              } catch (err) {
-                console.warn(`[Startup] Background mirror failed: ${err.message}`);
-              }
-            }, 5000);
-          } else {
-            // Non-WSL or WSL not available: use existing bootstrap flow
-            this.zoektMirror.bootstrapFromDatabase(this.database, mirrorProgress);
+          if (!this.zoektManager.useWsl || !this.zoektManager.wslMirrorDir) {
+            throw new Error('WSL required for Zoekt — install WSL2 with Ubuntu and Zoekt binaries');
           }
-        }
-
-        // Sync mirror to WSL if needed (skipped if bootstrapDirect already set effective path)
-        if (process.env.SKIP_SYNC !== '1' && !this.zoektManager._effectiveMirrorPath) {
-          await this.zoektManager.syncMirror(this.zoektMirror.getMirrorRoot());
+          console.log('[Startup] Direct-to-WSL bootstrap...');
+          await this.zoektManager.bootstrapDirect(this.database, this.zoektMirror, mirrorProgress);
+          this.zoektManager.mirrorRoot = this.zoektMirror.getMirrorRoot();
         } else if (!this.zoektManager._effectiveMirrorPath) {
+          // Mirror exists and is valid — set effective path for WSL
           this.zoektManager._effectiveMirrorPath = this.zoektManager.wslMirrorDir || this.zoektMirror.getMirrorRoot();
           this.zoektManager.mirrorRoot = this.zoektMirror.getMirrorRoot();
-          console.log('[Startup] WSL mirror sync skipped (SKIP_SYNC=1)');
         }
 
         const started = await this.zoektManager.start();

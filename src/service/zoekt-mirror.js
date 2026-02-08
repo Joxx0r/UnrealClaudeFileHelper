@@ -1,5 +1,5 @@
-import { mkdirSync, writeFileSync, unlinkSync, existsSync, readFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 import { inflateSync } from 'zlib';
 import tarStream from 'tar-stream';
 
@@ -18,65 +18,6 @@ export class ZoektMirror {
     return this.mirrorDir;
   }
 
-  bootstrapFromDatabase(database, onProgress = null) {
-    const startMs = performance.now();
-    console.log('[ZoektMirror] Bootstrapping mirror from database...');
-
-    mkdirSync(this.mirrorDir, { recursive: true });
-
-    this._computePathPrefix(database);
-
-    // Fetch all source file content from SQLite
-    const rows = database.db.prepare(
-      `SELECT fc.content, f.path, f.language FROM file_content fc
-       JOIN files f ON f.id = fc.file_id
-       WHERE f.language NOT IN ('content')`
-    ).all();
-
-    const total = rows.length;
-    let written = 0;
-    let assetCount = 0;
-    let errors = 0;
-    for (const row of rows) {
-      try {
-        const content = inflateSync(row.content);
-        const isAsset = row.language === 'asset';
-        const relativePath = isAsset
-          ? this._toAssetMirrorPath(row.path)
-          : this._toRelativePath(row.path);
-        const fullPath = join(this.mirrorDir, relativePath);
-        mkdirSync(dirname(fullPath), { recursive: true });
-        writeFileSync(fullPath, content);
-        written++;
-        if (isAsset) assetCount++;
-
-        // Progress reporting every 5000 files
-        if (onProgress && written % 5000 === 0) {
-          const elapsed = (performance.now() - startMs) / 1000;
-          const rate = written / elapsed;
-          onProgress({ written, total, rate: Math.round(rate), etaSeconds: Math.ceil((total - written) / rate) });
-        }
-      } catch (err) {
-        errors++;
-        if (errors <= 5) {
-          console.warn(`[ZoektMirror] Error writing ${row.path}: ${err.message}`);
-        }
-      }
-    }
-
-    // Write marker file
-    writeFileSync(this.markerPath, JSON.stringify({
-      timestamp: new Date().toISOString(),
-      fileCount: written,
-      assetCount,
-      pathPrefix: this.pathPrefix
-    }));
-
-    const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
-    console.log(`[ZoektMirror] Bootstrap complete: ${written} files written (${assetCount} assets), ${errors} errors (${durationS}s)`);
-    return written;
-  }
-
   /**
    * Stream all mirror files as a tar archive to a writable stream.
    * Used for direct-to-WSL bootstrap, skipping the Windows filesystem.
@@ -85,7 +26,6 @@ export class ZoektMirror {
     const startMs = performance.now();
     console.log('[ZoektMirror] Streaming bootstrap to tar...');
 
-    // Compute path prefix (same logic as bootstrapFromDatabase)
     this._computePathPrefix(database);
 
     const rows = database.db.prepare(
@@ -213,52 +153,8 @@ export class ZoektMirror {
     this._computePathPrefix(database);
   }
 
-  updateFile(filePath, content) {
-    try {
-      const relativePath = this._toRelativePath(filePath);
-      const fullPath = join(this.mirrorDir, relativePath);
-      mkdirSync(dirname(fullPath), { recursive: true });
-      writeFileSync(fullPath, content, 'utf-8');
-    } catch (err) {
-      console.warn(`[ZoektMirror] Error updating ${filePath}: ${err.message}`);
-    }
-  }
-
-  deleteFile(filePath) {
-    try {
-      const relativePath = this._toRelativePath(filePath);
-      const fullPath = join(this.mirrorDir, relativePath);
-      if (existsSync(fullPath)) {
-        unlinkSync(fullPath);
-      }
-    } catch (err) {
-      // File may already be gone
-    }
-  }
-
   getPathPrefix() {
     return this.pathPrefix;
-  }
-
-  updateAsset(contentPath, content) {
-    try {
-      const relativePath = this._toAssetMirrorPath(contentPath);
-      const fullPath = join(this.mirrorDir, relativePath);
-      mkdirSync(dirname(fullPath), { recursive: true });
-      writeFileSync(fullPath, content, 'utf-8');
-    } catch (err) {
-      console.warn(`[ZoektMirror] Error updating asset ${contentPath}: ${err.message}`);
-    }
-  }
-
-  deleteAsset(contentPath) {
-    try {
-      const relativePath = this._toAssetMirrorPath(contentPath);
-      const fullPath = join(this.mirrorDir, relativePath);
-      if (existsSync(fullPath)) {
-        unlinkSync(fullPath);
-      }
-    } catch {}
   }
 
   _toRelativePath(fullPath) {

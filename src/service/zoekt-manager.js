@@ -482,15 +482,29 @@ export class ZoektManager {
 
       const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
       const succeeded = results.filter(r => r.status === 'fulfilled').length;
-      const failed = results.filter(r => r.status === 'rejected').length;
+      const failedProjects = names.filter((_, i) => results[i].status === 'rejected');
 
       this.lastIndexCompleteTime = new Date().toISOString();
       this.lastIndexDurationS = parseFloat(durationS);
-      console.log(`[ZoektManager] Scoped reindex complete: ${succeeded} OK, ${failed} failed (${durationS}s)`);
+      console.log(`[ZoektManager] Scoped reindex complete: ${succeeded} OK, ${failedProjects.length} failed (${durationS}s)`);
 
       // Clean up old monolithic shards (from pre-per-project indexing)
       if (succeeded > 0 && !this._oldShardsCleanedUp) {
         this._cleanupOldShards();
+      }
+
+      // Retry failed projects once after 30s
+      if (failedProjects.length > 0 && !this._retryInProgress) {
+        this._retryInProgress = true;
+        setTimeout(async () => {
+          this._retryInProgress = false;
+          console.log(`[ZoektManager] Retrying failed projects: ${failedProjects.join(', ')}...`);
+          try {
+            await this.reindexProjects(failedProjects);
+          } catch (err) {
+            console.error(`[ZoektManager] Retry also failed: ${err.message}`);
+          }
+        }, 30000);
       }
     } finally {
       this._indexingActive = false;
@@ -621,7 +635,9 @@ export class ZoektManager {
       const normalized = relativePath.replace(/\\/g, '/');
       const wslPath = `${this.wslMirrorDir}/${normalized}`;
       execSync(`wsl -d Ubuntu -- bash -c "rm -f '${wslPath}'"`, { timeout: 5000, stdio: 'pipe' });
-    } catch {}
+    } catch (err) {
+      console.warn(`[ZoektManager] WSL mirror delete failed for ${relativePath}: ${err.message}`);
+    }
   }
 
   triggerReindex(changeCount = 1, affectedProjects = null) {
@@ -640,11 +656,20 @@ export class ZoektManager {
     const debounce = Math.min(30000, 2000 + this._pendingChangeCount * 200);
 
     this.reindexTimer = setTimeout(async () => {
+      this.reindexTimer = null;
+
+      // If indexing is already active, re-queue and retry after 5s
+      // (don't clear pending state — changes would be lost)
+      if (this._indexingActive) {
+        console.log('[ZoektManager] Index active, re-queuing pending changes...');
+        this.reindexTimer = setTimeout(() => this.triggerReindex(0), 5000);
+        return;
+      }
+
       const count = this._pendingChangeCount;
       const projects = new Set(this._pendingProjects);
       this._pendingChangeCount = 0;
       this._pendingProjects.clear();
-      this.reindexTimer = null;
 
       try {
         if (projects.size > 0) {
