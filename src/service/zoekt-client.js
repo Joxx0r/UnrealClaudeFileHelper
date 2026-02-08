@@ -74,6 +74,23 @@ export class ZoektClient {
     return result;
   }
 
+  async searchSymbols(symbolName, options = {}) {
+    const { project, language, caseSensitive = true, maxResults = 20 } = options;
+
+    const parts = [caseSensitive ? 'case:yes' : 'case:no'];
+    parts.push(`sym:${symbolName}`);
+
+    if (language && language !== 'all' && LANGUAGE_EXTENSIONS[language]) {
+      parts.push(`file:${LANGUAGE_EXTENSIONS[language]}`);
+    }
+    parts.push('-file:^_assets/');
+    if (project) {
+      parts.push(`file:${project}/`);
+    }
+
+    return this._executeQuery(parts.join(' '), maxResults, 0);
+  }
+
   async _executeQuery(query, maxResults, contextLines) {
     const body = {
       Q: query,
@@ -246,22 +263,8 @@ export class ZoektClient {
       }
     }
 
-    // Rank results: header files and high match-density files first
-    const fileScores = new Map();
-    for (const r of results) {
-      const prev = fileScores.get(r.file) || 0;
-      let score = prev + 1; // +1 per match in same file
-      if (!prev) {
-        if (r.file.endsWith('.h') || r.file.endsWith('.hpp')) score += 5;
-        if (r.file.includes('/Public/')) score += 3;
-      }
-      fileScores.set(r.file, score);
-    }
-    results.sort((a, b) => {
-      const sa = fileScores.get(a.file) || 0;
-      const sb = fileScores.get(b.file) || 0;
-      return sb - sa || a.line - b.line;
-    });
+    // Results returned unranked — ranking is done in the API layer (search-ranking.js)
+    // with access to database metadata (mtime, symbol detection, etc.)
 
     return {
       results,

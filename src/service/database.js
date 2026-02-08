@@ -329,6 +329,24 @@ export class IndexDatabase {
     return this.db.prepare(sql).all(...params);
   }
 
+  getFilesMtime(filePaths) {
+    if (!filePaths || filePaths.length === 0) return new Map();
+    // Batch query — SQLite max variable limit is 999, chunk if needed
+    const result = new Map();
+    const chunkSize = 900;
+    for (let i = 0; i < filePaths.length; i += chunkSize) {
+      const chunk = filePaths.slice(i, i + chunkSize);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.db.prepare(
+        `SELECT path, mtime FROM files WHERE path IN (${placeholders})`
+      ).all(...chunk);
+      for (const row of rows) {
+        result.set(row.path, row.mtime);
+      }
+    }
+    return result;
+  }
+
   upsertFile(path, project, module, mtime, language = 'angelscript') {
     const stmt = this.db.prepare(`
       INSERT INTO files (path, project, module, mtime, language)

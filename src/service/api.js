@@ -1,6 +1,7 @@
 import express from 'express';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { rankResults, groupResultsByFile } from './search-ranking.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SLOW_QUERY_MS = 100;
@@ -138,10 +139,32 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-type', async (req, res) => {
     try {
-      const { name, fuzzy, project, language, maxResults } = req.query;
+      const { name, fuzzy, project, language, maxResults, useZoekt } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
+      }
+
+      const mr = parseInt(maxResults, 10) || 10;
+
+      // Try Zoekt symbol search if requested and available
+      if (useZoekt === 'true' && zoektClient) {
+        try {
+          const symbolResult = await zoektClient.searchSymbols(name, {
+            project: project || null,
+            language: language || null,
+            caseSensitive: true,
+            maxResults: mr
+          });
+          if (symbolResult.results.length > 0) {
+            return res.json({
+              results: symbolResult.results.map(r => ({ ...r, file: cleanPath(r.file) })),
+              source: 'zoekt-symbol'
+            });
+          }
+        } catch (err) {
+          // Fall through to database search
+        }
       }
 
       const opts = {
@@ -149,11 +172,11 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         project: project || null,
         language: language || null,
         kind: req.query.kind || null,
-        maxResults: parseInt(maxResults, 10) || 10
+        maxResults: mr
       };
 
       const results = await poolQuery('findTypeByName', [name, opts]);
-      res.json({ results });
+      res.json({ results, source: 'database' });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -260,10 +283,32 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-member', async (req, res) => {
     try {
-      const { name, fuzzy, containingType, memberKind, project, language, maxResults } = req.query;
+      const { name, fuzzy, containingType, memberKind, project, language, maxResults, useZoekt } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
+      }
+
+      const mr = parseInt(maxResults, 10) || 20;
+
+      // Try Zoekt symbol search if requested and available
+      if (useZoekt === 'true' && zoektClient) {
+        try {
+          const symbolResult = await zoektClient.searchSymbols(name, {
+            project: project || null,
+            language: language || null,
+            caseSensitive: true,
+            maxResults: mr
+          });
+          if (symbolResult.results.length > 0) {
+            return res.json({
+              results: symbolResult.results.map(r => ({ ...r, file: cleanPath(r.file) })),
+              source: 'zoekt-symbol'
+            });
+          }
+        } catch (err) {
+          // Fall through to database search
+        }
       }
 
       const opts = {
@@ -272,11 +317,11 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         memberKind: memberKind || null,
         project: project || null,
         language: language || null,
-        maxResults: parseInt(maxResults, 10) || 20
+        maxResults: mr
       };
 
       const results = await poolQuery('findMember', [name, opts]);
-      res.json({ results });
+      res.json({ results, source: 'database' });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -441,7 +486,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   // --- Content search (grep) ---
 
   app.get('/grep', async (req, res) => {
-    const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl } = req.query;
+    const { pattern, project, language, caseSensitive: cs, maxResults: mr, contextLines: cl, grouped } = req.query;
 
     if (!pattern) {
       return res.status(400).json({ error: 'pattern parameter required' });
@@ -482,8 +527,30 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         })
       ]);
 
+      // Clean paths and rank results
+      let results = sourceResult.results.map(r => ({ ...r, file: cleanPath(r.file) }));
+
+      // Fetch mtime metadata for ranking
+      const uniquePaths = [...new Set(results.map(r => r.file))];
+      const mtimeMap = database.getFilesMtime(uniquePaths);
+      results = rankResults(results, mtimeMap);
+
+      if (grouped === 'true') {
+        return res.json({
+          results: groupResultsByFile(results),
+          totalMatches: sourceResult.totalMatches,
+          truncated: sourceResult.results.length < sourceResult.totalMatches,
+          timedOut: false,
+          filesSearched: sourceResult.filesSearched,
+          searchEngine: 'zoekt',
+          zoektDurationMs: sourceResult.zoektDurationMs,
+          grouped: true,
+          assets: assetResult.results.length > 0 ? assetResult.results : undefined
+        });
+      }
+
       const response = {
-        results: sourceResult.results.map(r => ({ ...r, file: cleanPath(r.file) })),
+        results,
         totalMatches: sourceResult.totalMatches,
         truncated: sourceResult.results.length < sourceResult.totalMatches,
         timedOut: false,
