@@ -113,13 +113,9 @@ export class BackgroundIndexer {
               this.database.insertMembers(fileId, resolvedMembers);
             }
 
-            // Insert compressed content and trigrams for content search
+            // Insert compressed content for Zoekt mirror bootstrap
             if (fileResult.compressedContent) {
               this.database.upsertFileContent(fileId, fileResult.compressedContent, fileResult.contentHash);
-              this.database.clearTrigramsForFile(fileId);
-              if (fileResult.trigrams && fileResult.trigrams.length > 0) {
-                this.database.insertTrigrams(fileId, fileResult.trigrams);
-              }
             }
           }
         });

@@ -3,7 +3,6 @@
 import { readFile } from 'fs/promises';
 import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
-import { Worker } from 'worker_threads';
 import { readdirSync, statSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import { IndexDatabase } from './database.js';
@@ -300,7 +299,6 @@ class UnrealIndexService {
       this.backgroundIndexer.indexLanguageAsync('cpp').then(() => {
         console.log('C++ background indexing complete');
         this.printIndexSummary();
-        if (this._onCppComplete) this._onCppComplete();
       }).catch(err => {
         console.error('C++ background indexing failed:', err);
       });
@@ -316,36 +314,9 @@ class UnrealIndexService {
       });
     }
 
-    // Seed trigram count caches if missing (one-time migration)
-    if (this.database.hasTrigramTables() &&
-        (this.database.getMetadata('trigramCount') === null || this.database.getMetadata('trigramFileCount') === null)) {
-      console.log('[Startup] Calculating trigram counts (one-time)...');
-      const t2 = performance.now();
-      this.database.recalculateTrigramCount();
-      console.log(`[Startup] trigram counts cached: ${(performance.now() - t2).toFixed(0)}ms`);
-    }
-
     this.printIndexSummary();
 
-    // Build trigram index for files that don't have it yet (migration path)
-    const needsTrigramBuild = this.database.getMetadata('trigramBuildNeeded');
-    if (needsTrigramBuild) {
-      const startTrigramBuild = () => {
-        this.buildMissingTrigrams().catch(err => {
-          console.error('[Trigram] Build failed:', err);
-        });
-      };
-
-      if (cppEmpty) {
-        // C++ is indexing in background — it will get trigrams via the pipeline.
-        // Wait for it to finish, then build trigrams for remaining files.
-        this._onCppComplete = startTrigramBuild;
-      } else {
-        startTrigramBuild();
-      }
-    }
-
-    // Build asset content index if assets exist but haven't been trigram-indexed yet (migration)
+    // Build asset content index if assets exist but haven't been indexed yet (migration)
     this.buildAssetContentIfNeeded();
 
     process.on('SIGINT', () => this.shutdown());
@@ -568,75 +539,6 @@ class UnrealIndexService {
       }
       console.log(`[Startup] Asset content index built: ${total} assets in ${((performance.now() - t) / 1000).toFixed(1)}s`);
     }
-  }
-
-  async buildMissingTrigrams() {
-    const missingFiles = this.database.getFilesWithoutContent();
-    if (missingFiles.length === 0) {
-      console.log('[Trigram] All files already have trigram data');
-      this.database.setMetadata('trigramBuildNeeded', false);
-      return;
-    }
-
-    console.log(`[Trigram] Building trigram index for ${missingFiles.length} files...`);
-    const buildStart = performance.now();
-
-    const workerCount = Math.min(8, os.cpus().length);
-    const workerPath = join(__dirname, 'trigram-build-worker.js');
-    const WAVE_SIZE = 2000;
-    const INSERT_BATCH = 100;
-    let totalProcessed = 0;
-
-    for (let w = 0; w < missingFiles.length; w += WAVE_SIZE) {
-      const wave = missingFiles.slice(w, w + WAVE_SIZE);
-      const chunkSize = Math.ceil(wave.length / workerCount);
-      const chunks = [];
-      for (let i = 0; i < wave.length; i += chunkSize) {
-        chunks.push(wave.slice(i, i + chunkSize));
-      }
-
-      const waveStart = performance.now();
-      const workerPromises = chunks.map(chunk =>
-        new Promise((resolve, reject) => {
-          const worker = new Worker(workerPath, { workerData: { files: chunk } });
-          worker.on('message', msg => {
-            if (msg.type === 'complete') resolve(msg.results);
-          });
-          worker.on('error', reject);
-          worker.on('exit', code => {
-            if (code !== 0) reject(new Error(`Trigram worker exited with code ${code}`));
-          });
-        })
-      );
-
-      const waveResults = (await Promise.all(workerPromises)).flat();
-
-      // Insert in small batches with event loop yields
-      for (let i = 0; i < waveResults.length; i += INSERT_BATCH) {
-        const batch = waveResults.slice(i, i + INSERT_BATCH);
-        this.database.transaction(() => {
-          for (const result of batch) {
-            this.database.upsertFileContent(result.fileId, result.compressedContent, result.contentHash);
-            this.database.clearTrigramsForFile(result.fileId);
-            if (result.trigrams.length > 0) {
-              this.database.insertTrigrams(result.fileId, result.trigrams);
-            }
-          }
-        });
-        await new Promise(resolve => setImmediate(resolve));
-      }
-
-      totalProcessed += waveResults.length;
-      const waveMs = ((performance.now() - waveStart) / 1000).toFixed(1);
-      console.log(`[Trigram] Wave ${Math.floor(w / WAVE_SIZE) + 1}: ${totalProcessed}/${missingFiles.length} files (${waveMs}s)`);
-    }
-
-    this.database.setMetadata('trigramBuildNeeded', false);
-    // Recalculate exact trigram count after full build
-    const exactCount = this.database.recalculateTrigramCount();
-    const totalTime = ((performance.now() - buildStart) / 1000).toFixed(1);
-    const stats = this.database.getTrigramStats();
-    console.log(`[Trigram] Build complete in ${totalTime}s: ${stats.filesWithContent} files, ${exactCount} trigram entries`);
   }
 
   printIndexSummary() {

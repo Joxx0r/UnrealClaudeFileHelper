@@ -3,7 +3,7 @@ import { readFileSync } from 'fs';
 import { deflateSync } from 'zlib';
 import { parseCppContent } from '../parsers/cpp-parser.js';
 import { parseContent as parseAngelscriptContent } from '../parsers/angelscript-parser.js';
-import { extractTrigrams, contentHash } from './trigram.js';
+import { contentHash } from './trigram.js';
 
 const { files, language, workerIndex } = workerData;
 
@@ -99,8 +99,7 @@ async function processFiles() {
         }
       }
 
-      // Extract trigrams and compress content for the trigram index
-      const trigrams = [...extractTrigrams(content)];
+      // Compress content for Zoekt mirror bootstrap
       const compressedContent = deflateSync(content);
       const hash = contentHash(content);
 
@@ -111,7 +110,6 @@ async function processFiles() {
         mtime: file.mtime,
         types,
         members: parsed.members || [],
-        trigrams,
         compressedContent,
         contentHash: hash
       });

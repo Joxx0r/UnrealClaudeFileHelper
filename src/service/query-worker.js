@@ -18,9 +18,7 @@ const ALLOWED_METHODS = new Set([
   'browseAssetFolder',
   'listAssetFolders',
   'getStats',
-  'getAssetStats',
-  'queryTrigramCandidates',
-  'grepInline'
+  'getAssetStats'
 ]);
 
 parentPort.on('message', (msg) => {

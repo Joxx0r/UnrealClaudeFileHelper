@@ -5,7 +5,7 @@ import { deflateSync } from 'zlib';
 import { parseFile } from '../parser.js';
 import { parseCppContent } from '../parsers/cpp-parser.js';
 import { parseUAssetHeader } from '../parsers/uasset-parser.js';
-import { extractTrigrams, contentHash } from './trigram.js';
+import { contentHash } from './trigram.js';
 
 export class FileWatcher {
   constructor(config, database, options = {}) {
@@ -307,14 +307,9 @@ export class FileWatcher {
       }
 
       if (fileContent && fileContent.length <= 500000) {
-        const trigrams = [...extractTrigrams(fileContent)];
         const compressed = deflateSync(fileContent);
         const hash = contentHash(fileContent);
         this.database.upsertFileContent(fileId, compressed, hash);
-        this.database.clearTrigramsForFile(fileId);
-        if (trigrams.length > 0) {
-          this.database.insertTrigrams(fileId, trigrams);
-        }
 
         // Update Zoekt mirror with the raw file content (Windows + WSL)
         if (this.zoektMirror) {

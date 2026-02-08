@@ -139,33 +139,13 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-type', async (req, res) => {
     try {
-      const { name, fuzzy, project, language, maxResults, useZoekt } = req.query;
+      const { name, fuzzy, project, language, maxResults } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
 
       const mr = parseInt(maxResults, 10) || 10;
-
-      // Try Zoekt symbol search if requested and available
-      if (useZoekt === 'true' && zoektClient) {
-        try {
-          const symbolResult = await zoektClient.searchSymbols(name, {
-            project: project || null,
-            language: language || null,
-            caseSensitive: true,
-            maxResults: mr
-          });
-          if (symbolResult.results.length > 0) {
-            return res.json({
-              results: symbolResult.results.map(r => ({ ...r, file: cleanPath(r.file) })),
-              source: 'zoekt-symbol'
-            });
-          }
-        } catch (err) {
-          // Fall through to database search
-        }
-      }
 
       const opts = {
         fuzzy: fuzzy === 'true',
@@ -283,33 +263,13 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-member', async (req, res) => {
     try {
-      const { name, fuzzy, containingType, memberKind, project, language, maxResults, useZoekt } = req.query;
+      const { name, fuzzy, containingType, memberKind, project, language, maxResults } = req.query;
 
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
 
       const mr = parseInt(maxResults, 10) || 20;
-
-      // Try Zoekt symbol search if requested and available
-      if (useZoekt === 'true' && zoektClient) {
-        try {
-          const symbolResult = await zoektClient.searchSymbols(name, {
-            project: project || null,
-            language: language || null,
-            caseSensitive: true,
-            maxResults: mr
-          });
-          if (symbolResult.results.length > 0) {
-            return res.json({
-              results: symbolResult.results.map(r => ({ ...r, file: cleanPath(r.file) })),
-              source: 'zoekt-symbol'
-            });
-          }
-        } catch (err) {
-          // Fall through to database search
-        }
-      }
 
       const opts = {
         fuzzy: fuzzy === 'true',
