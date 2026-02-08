@@ -686,6 +686,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const uniquePaths = [...new Set(results.map(r => r.file))];
       const mtimeMap = database.getFilesMtime(uniquePaths);
       results = rankResults(results, mtimeMap);
+      if (results.length > maxResults) results = results.slice(0, maxResults);
 
       const durationMs = Math.round(performance.now() - grepStartMs);
       const logFn = durationMs > 1000 ? console.warn : console.log;

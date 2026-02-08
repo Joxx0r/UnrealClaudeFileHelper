@@ -248,7 +248,7 @@ export class ZoektClient {
           project: fileProject,
           language: fileLanguage,
           line: (lm.LineNumber || 0) + 1, // Zoekt uses 0-based line numbers
-          match: this._decodeBytes(lm.Line).trimEnd()
+          match: this._decodeBytes(lm.Line).trim()
         };
 
         // Context lines (Before/After are []byte → single base64 string containing multiple lines)
@@ -257,13 +257,13 @@ export class ZoektClient {
           if (lm.Before) {
             const lines = this._decodeBytes(lm.Before).split(/\r?\n/);
             for (const line of lines) {
-              if (line || result.context.length > 0) result.context.push(line.trimEnd());
+              if (line || result.context.length > 0) result.context.push(line.trim());
             }
           }
           if (lm.After) {
             const lines = this._decodeBytes(lm.After).split(/\r?\n/);
             for (const line of lines) {
-              result.context.push(line.trimEnd());
+              result.context.push(line.trim());
             }
           }
           // Remove trailing empty lines
