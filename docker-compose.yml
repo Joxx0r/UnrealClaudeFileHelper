@@ -1,0 +1,15 @@
+services:
+  unreal-index:
+    build: .
+    ports:
+      - "3847:3847"
+      - "6070:6070"
+    volumes:
+      - ./data:/app/data
+      # Mount your project directories as read-only under /projects
+      # Examples:
+      #   - D:/p4/games/MyProject:/projects/MyProject:ro
+      #   - /mnt/p4/games/MyProject:/projects/MyProject:ro
+    environment:
+      - NO_WATCHER=1  # Disable file watcher (use volume-triggered reindex instead)
+    restart: unless-stopped

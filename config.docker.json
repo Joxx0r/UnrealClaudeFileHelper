@@ -1,0 +1,59 @@
+{
+  "projects": [
+    {
+      "name": "MyGame",
+      "paths": ["/projects/MyProject/Script"],
+      "language": "angelscript"
+    },
+    {
+      "name": "MyGame-Cpp",
+      "paths": ["/projects/MyProject/Source", "/projects/MyProject/Plugins"],
+      "language": "cpp"
+    },
+    {
+      "name": "Engine",
+      "paths": ["/projects/Engine/Source"],
+      "language": "cpp"
+    },
+    {
+      "name": "MyGame-Content",
+      "paths": ["/projects/MyProject/Content"],
+      "contentRoot": "/projects/MyProject/Content",
+      "language": "content",
+      "extensions": [".uasset", ".umap"]
+    },
+    {
+      "name": "MyGame-Config",
+      "paths": ["/projects/MyProject/Config"],
+      "language": "config",
+      "extensions": [".ini"]
+    }
+  ],
+  "exclude": [
+    "**/Intermediate/**",
+    "**/Binaries/**",
+    "**/ThirdParty/**",
+    "**/__ExternalActors__/**",
+    "**/__ExternalObjects__/**",
+    "**/Developers/**",
+    "**/.git/**",
+    "**/node_modules/**"
+  ],
+  "service": {
+    "port": 3847,
+    "host": "0.0.0.0"
+  },
+  "watcher": {
+    "debounceMs": 100
+  },
+  "zoekt": {
+    "enabled": true,
+    "webPort": 6070,
+    "indexDir": "./data/zoekt-index",
+    "mirrorDir": "./data/zoekt-mirror",
+    "parallelism": 4,
+    "fileLimitBytes": 524288,
+    "reindexDebounceMs": 5000,
+    "searchTimeoutMs": 3000
+  }
+}

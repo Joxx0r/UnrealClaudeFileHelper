@@ -1,0 +1,10 @@
+node_modules/
+data/
+*.log
+config.json
+.git/
+.github/
+profiles/
+memory/
+perf-results-*.json
+NUL

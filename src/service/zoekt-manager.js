@@ -183,12 +183,15 @@ export class ZoektManager {
       if (this.useWsl) {
         execSync(`wsl -d Ubuntu -- bash -c "pkill -9 -f zoekt-webserver 2>/dev/null; pkill -9 -f zoekt-web 2>/dev/null"`,
           { stdio: 'ignore', timeout: 5000 });
-      } else {
+      } else if (process.platform === 'win32') {
         const result = execSync(`netstat -ano | findstr ":${this.webPort}.*LISTENING"`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
         const pids = [...new Set(result.split('\n').map(l => l.trim().split(/\s+/).pop()).filter(Boolean))];
         for (const pid of pids) {
           try { execSync(`taskkill /PID ${pid} /F`, { stdio: 'ignore' }); } catch {}
         }
+      } else {
+        // Linux/macOS — kill stale Zoekt processes
+        execSync(`pkill -9 -f zoekt-webserver 2>/dev/null || true`, { stdio: 'ignore', timeout: 5000 });
       }
     } catch {}
   }

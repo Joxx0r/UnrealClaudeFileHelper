@@ -545,8 +545,20 @@ function clearDatabase() {
 
 // ── Prerequisites check ───────────────────────────────────
 
+function isDockerEnvironment() {
+  return process.env.DOCKER === '1' || existsSync('/.dockerenv');
+}
+
 function checkPrerequisites() {
-  const results = { go: false, zoekt: false, wsl: false, goVersion: null, zoektLocation: null };
+  const results = { go: false, zoekt: false, wsl: false, docker: false, goVersion: null, zoektLocation: null };
+
+  // Docker environment — Zoekt binaries are pre-installed, skip Go/WSL checks
+  if (isDockerEnvironment()) {
+    results.docker = true;
+    results.zoekt = true;
+    results.zoektLocation = 'Docker (built-in)';
+    return results;
+  }
 
   // Check Go
   try {
@@ -598,6 +610,15 @@ async function actionCheckPrerequisites() {
   s.stop('Prerequisites checked.');
 
   const lines = [];
+
+  if (prereqs.docker) {
+    lines.push('  Docker: YES (all prerequisites bundled)');
+    lines.push(`  Zoekt:  OK (${prereqs.zoektLocation})`);
+    lines.push('');
+    lines.push('  Zoekt code search will be enabled for fast /grep queries.');
+    p.note(lines.join('\n'), 'Prerequisites');
+    return prereqs;
+  }
 
   // Go
   if (prereqs.go) {

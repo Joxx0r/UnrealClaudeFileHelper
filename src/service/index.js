@@ -22,21 +22,35 @@ const __dirname = dirname(__filename);
 
 function killExistingService(port) {
   try {
-    const netstatOutput = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, {
-      encoding: 'utf-8',
-      shell: 'cmd.exe'
-    });
+    if (process.platform === 'win32') {
+      const netstatOutput = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, {
+        encoding: 'utf-8',
+        shell: 'cmd.exe'
+      });
 
-    const lines = netstatOutput.trim().split('\n');
-    for (const line of lines) {
-      const parts = line.trim().split(/\s+/);
-      const pid = parts[parts.length - 1];
-      if (pid && pid !== '0') {
+      const lines = netstatOutput.trim().split('\n');
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parts[parts.length - 1];
+        if (pid && pid !== '0') {
+          console.log(`Killing existing service (PID ${pid})...`);
+          try {
+            execSync(`taskkill /PID ${pid} /F`, { shell: 'cmd.exe', stdio: 'ignore' });
+          } catch {}
+        }
+      }
+    } else {
+      // Linux/macOS — use lsof to find processes on the port
+      const lsofOutput = execSync(`lsof -ti :${port}`, {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe']
+      }).trim();
+
+      for (const pid of lsofOutput.split('\n').filter(Boolean)) {
         console.log(`Killing existing service (PID ${pid})...`);
         try {
-          execSync(`taskkill /PID ${pid} /F`, { shell: 'cmd.exe', stdio: 'ignore' });
-        } catch {
-        }
+          execSync(`kill -9 ${pid}`, { stdio: 'ignore' });
+        } catch {}
       }
     }
   } catch {
