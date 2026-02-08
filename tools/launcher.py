@@ -434,7 +434,13 @@ class InstallView(QWidget):
         # Auto-start
         QTimer.singleShot(200, self._start_install)
 
+    def _cleanup_worker(self) -> None:
+        if self._worker is not None:
+            self._worker.wait(5000)
+            self._worker = None
+
     def _start_install(self) -> None:
+        self._cleanup_worker()
         self._retry_btn.setVisible(False)
         self._continue_btn.setVisible(False)
         self._progress.setValue(0)
@@ -448,6 +454,7 @@ class InstallView(QWidget):
         self._worker.step_completed.connect(self._on_step_completed)
         self._worker.log_output.connect(self._on_log)
         self._worker.all_done.connect(self._on_all_done)
+        self._worker.finished.connect(self._cleanup_worker)
         self._worker.start()
 
     def _on_step_started(self, index: int, description: str) -> None:
@@ -650,7 +657,13 @@ class PrerequisitesView(QWidget):
 
         QTimer.singleShot(200, self._start_check)
 
+    def _cleanup_worker(self) -> None:
+        if self._worker is not None:
+            self._worker.wait(5000)
+            self._worker = None
+
     def _start_check(self) -> None:
+        self._cleanup_worker()
         self._recheck_btn.setVisible(False)
         self._continue_btn.setVisible(False)
         self._status_label.setVisible(False)
@@ -663,6 +676,7 @@ class PrerequisitesView(QWidget):
 
         self._worker = PrereqCheckWorker()
         self._worker.result_ready.connect(self._on_results)
+        self._worker.finished.connect(self._cleanup_worker)
         self._worker.start()
 
     def _on_results(self, results: list) -> None:
@@ -1189,11 +1203,18 @@ class LauncherView(QWidget):
         self._timer.start(3000)
         self._refresh()
 
+    def _cleanup_worker(self) -> None:
+        if self._check_worker is not None:
+            self._check_worker.wait(2000)
+            self._check_worker = None
+
     def _refresh(self) -> None:
-        if self._check_worker and self._check_worker.isRunning():
+        if self._check_worker is not None and self._check_worker.isRunning():
             return
+        self._cleanup_worker()
         self._check_worker = StatusCheckWorker(self._port)
         self._check_worker.result_ready.connect(self._on_status)
+        self._check_worker.finished.connect(self._cleanup_worker)
         self._check_worker.start()
 
     def _on_status(self, index_running: bool, watcher_running: bool) -> None:
@@ -1316,6 +1337,17 @@ class UnrealIndexApp(QMainWindow):
 
     def _on_setup_done(self, options: dict) -> None:
         self._show_install(options)
+
+    def closeEvent(self, event) -> None:
+        # Stop launcher timer and wait for any running threads
+        if self._launcher_view is not None:
+            self._launcher_view._timer.stop()
+            self._launcher_view._cleanup_worker()
+        if self._install_view is not None:
+            self._install_view._cleanup_worker()
+        if self._prereqs_view is not None:
+            self._prereqs_view._cleanup_worker()
+        super().closeEvent(event)
 
 
 def main() -> None:
