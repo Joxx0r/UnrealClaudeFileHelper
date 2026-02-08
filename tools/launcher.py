@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -38,13 +39,19 @@ from service_manager import (
     check_port,
     check_watcher_running,
     check_wsl_screen,
+    clone_or_pull_wsl,
     config_exists,
+    create_wsl_data_dirs,
+    install_deps_wsl,
+    install_node_deps,
+    install_zoekt_binaries,
     read_config,
     read_port,
     start_index_service,
     start_watcher,
     stop_index_service,
     stop_watcher,
+    validate_service,
     write_config,
 )
 from index_stats import IndexStatsPanel
@@ -181,6 +188,273 @@ class StatusCheckWorker(QThread):
         self.result_ready.emit(index_up, watcher_up)
 
 
+# ── Step Widget ────────────────────────────────────────────
+
+
+class StepWidget(QLabel):
+    """A single install step label with pending/running/done/failed states."""
+
+    def __init__(self, text: str, parent=None) -> None:
+        super().__init__(parent)
+        self._text = text
+        self.set_pending()
+
+    def set_pending(self) -> None:
+        self.setText(f"  \u25CB  {self._text}")
+        self.setStyleSheet(f"color: {COLORS['muted']};")
+
+    def set_running(self) -> None:
+        self.setText(f"  \u25CF  {self._text}...")
+        self.setStyleSheet(f"color: {COLORS['accent']};")
+
+    def set_done(self, message: str = "") -> None:
+        suffix = f" \u2014 {message}" if message else ""
+        self.setText(f"  \u2714  {self._text}{suffix}")
+        self.setStyleSheet(f"color: {COLORS['success']};")
+
+    def set_failed(self, message: str = "") -> None:
+        suffix = f" \u2014 {message}" if message else ""
+        self.setText(f"  \u2718  {self._text}{suffix}")
+        self.setStyleSheet(f"color: {COLORS['error']};")
+
+
+# ── Install Worker ─────────────────────────────────────────
+
+_INSTALL_STEP_LABELS = [
+    "Install Node.js dependencies (Windows)",
+    "Clone/update repo in WSL",
+    "Install Node.js dependencies (WSL)",
+    "Install Zoekt search binaries",
+    "Create data directories",
+    "Write configuration",
+    "Validate service",
+]
+
+
+class InstallWorker(QThread):
+    step_started = Signal(int, str)
+    step_completed = Signal(int, bool, str)
+    log_output = Signal(str)
+    all_done = Signal(bool)
+
+    def __init__(self, config: dict) -> None:
+        super().__init__()
+        self._config = config
+
+    def run(self) -> None:
+        all_ok = True
+
+        # Step 0: npm install (Windows-side for watcher)
+        self.step_started.emit(0, "Installing Node.js dependencies...")
+        ok, msg = install_node_deps(lambda o: self.log_output.emit(o))
+        self.step_completed.emit(0, ok, msg)
+        if not ok:
+            all_ok = False
+
+        # Step 1: Clone/update repo in WSL
+        if sys.platform == "win32":
+            self.step_started.emit(1, "Cloning/updating repo in WSL...")
+            ok, msg = clone_or_pull_wsl(lambda o: self.log_output.emit(o))
+            self.step_completed.emit(1, ok, msg)
+            if not ok:
+                all_ok = False
+        else:
+            self.step_completed.emit(1, True, "Skipped (not Windows)")
+
+        # Step 2: WSL npm install
+        if sys.platform == "win32":
+            self.step_started.emit(2, "Installing WSL Node.js dependencies...")
+            ok, msg = install_deps_wsl(lambda o: self.log_output.emit(o))
+            self.step_completed.emit(2, ok, msg)
+            if not ok:
+                all_ok = False
+        else:
+            self.step_completed.emit(2, True, "Skipped (not Windows)")
+
+        # Step 3: Zoekt binaries
+        self.step_started.emit(3, "Installing Zoekt search binaries...")
+        ok, msg = install_zoekt_binaries(lambda o: self.log_output.emit(o))
+        if ok:
+            self.step_completed.emit(3, True, msg)
+        else:
+            self.log_output.emit(f"  Zoekt: {msg}")
+            self.log_output.emit("  WARNING: Zoekt is required for search. Install Go and retry.")
+            self.step_completed.emit(3, False, msg)
+            all_ok = False
+
+        # Step 4: Data directories
+        self.step_started.emit(4, "Creating data directories...")
+        ok, msg = create_wsl_data_dirs(lambda o: self.log_output.emit(o))
+        self.step_completed.emit(4, ok, msg)
+        if not ok:
+            all_ok = False
+
+        # Step 5: Write config
+        self.step_started.emit(5, "Writing configuration...")
+        try:
+            write_config(self._config)
+            self.step_completed.emit(5, True, "config.json written")
+        except Exception as e:
+            self.step_completed.emit(5, False, str(e))
+            all_ok = False
+
+        # Step 6: Validate service
+        self.step_started.emit(6, "Validating service startup...")
+        port = int(self._config.get("service", {}).get("port", 3847))
+        ok, msg = validate_service(port, timeout_secs=20)
+        self.step_completed.emit(6, ok, msg)
+        if not ok:
+            self.log_output.emit("  Service did not start. Check WSL and Node.js installation.")
+            all_ok = False
+
+        self.all_done.emit(all_ok)
+
+
+# ── Install View ───────────────────────────────────────────
+
+
+class InstallView(QWidget):
+    install_complete = Signal()
+
+    def __init__(self, config: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._config = config
+        self._worker: InstallWorker | None = None
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+        scroll.setWidget(container)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
+        title = QLabel("Installing Unreal Index")
+        title.setStyleSheet(f"color: {COLORS['info']}; font-size: 16pt; font-weight: bold;")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Setting up dependencies and services...")
+        subtitle.setStyleSheet(f"color: {COLORS['muted']}; font-size: 10pt;")
+        layout.addWidget(subtitle)
+
+        layout.addSpacing(8)
+
+        # Progress bar
+        self._progress = QProgressBar()
+        self._progress.setRange(0, len(_INSTALL_STEP_LABELS))
+        self._progress.setValue(0)
+        self._progress.setTextVisible(False)
+        self._progress.setFixedHeight(6)
+        self._progress.setStyleSheet(
+            f"QProgressBar {{ background: {COLORS['bg_dark']}; border: none; border-radius: 3px; }}"
+            f"QProgressBar::chunk {{ background: {COLORS['accent']}; border-radius: 3px; }}"
+        )
+        layout.addWidget(self._progress)
+
+        layout.addSpacing(4)
+
+        # Step widgets
+        self._steps: list[StepWidget] = []
+        for label in _INSTALL_STEP_LABELS:
+            step = StepWidget(label)
+            self._steps.append(step)
+            layout.addWidget(step)
+
+        layout.addSpacing(8)
+
+        # Log output
+        log_label = QLabel("Log")
+        log_label.setStyleSheet(f"color: {COLORS['muted']}; font-size: 9pt;")
+        layout.addWidget(log_label)
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMaximumHeight(180)
+        self._log.setStyleSheet(
+            f"background: {COLORS['bg_dark']}; color: {COLORS['fg']}; "
+            f"font-family: Consolas, monospace; font-size: 9pt; "
+            f"border: 1px solid {COLORS['border']}; border-radius: 4px;"
+        )
+        layout.addWidget(self._log)
+
+        # Buttons row
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        self._retry_btn = QPushButton("Retry")
+        self._retry_btn.setFixedWidth(100)
+        self._retry_btn.setVisible(False)
+        self._retry_btn.clicked.connect(self._start_install)
+        btn_row.addWidget(self._retry_btn)
+
+        self._continue_btn = QPushButton("Continue to Launcher")
+        self._continue_btn.setFixedWidth(180)
+        self._continue_btn.setVisible(False)
+        self._continue_btn.setStyleSheet(
+            f"QPushButton {{ background: {COLORS['accent']}; color: {COLORS['bg']}; "
+            f"font-weight: bold; border: none; padding: 8px 20px; border-radius: 4px; }}"
+            f"QPushButton:hover {{ background: #caa4ff; }}"
+        )
+        self._continue_btn.clicked.connect(lambda: self.install_complete.emit())
+        btn_row.addWidget(self._continue_btn)
+
+        layout.addLayout(btn_row)
+        layout.addStretch()
+
+        # Auto-start
+        QTimer.singleShot(200, self._start_install)
+
+    def _start_install(self) -> None:
+        self._retry_btn.setVisible(False)
+        self._continue_btn.setVisible(False)
+        self._progress.setValue(0)
+        self._log.clear()
+        self._completed_steps = 0
+        for step in self._steps:
+            step.set_pending()
+
+        self._worker = InstallWorker(self._config)
+        self._worker.step_started.connect(self._on_step_started)
+        self._worker.step_completed.connect(self._on_step_completed)
+        self._worker.log_output.connect(self._on_log)
+        self._worker.all_done.connect(self._on_all_done)
+        self._worker.start()
+
+    def _on_step_started(self, index: int, description: str) -> None:
+        if 0 <= index < len(self._steps):
+            self._steps[index].set_running()
+        self._log.append(description)
+
+    def _on_step_completed(self, index: int, success: bool, message: str) -> None:
+        if 0 <= index < len(self._steps):
+            if success:
+                self._steps[index].set_done(message)
+            else:
+                self._steps[index].set_failed(message)
+        self._completed_steps = index + 1
+        self._progress.setValue(self._completed_steps)
+        if message:
+            prefix = "OK" if success else "FAILED"
+            self._log.append(f"  {prefix}: {message}")
+
+    def _on_log(self, text: str) -> None:
+        self._log.append(text)
+
+    def _on_all_done(self, success: bool) -> None:
+        if success:
+            self._log.append("\nAll steps completed successfully!")
+            self._continue_btn.setVisible(True)
+        else:
+            self._log.append("\nSome steps failed. Fix the issues and click Retry.")
+            self._retry_btn.setVisible(True)
+            self._continue_btn.setVisible(True)
+
+
 # ── Setup View ─────────────────────────────────────────────
 
 
@@ -242,7 +516,7 @@ def _detect_engine_dirs(engine_root: str) -> list[dict]:
 
 
 class SetupView(QWidget):
-    setup_complete = Signal()
+    setup_complete = Signal(dict)  # emits the config dict for installation
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -349,7 +623,7 @@ class SetupView(QWidget):
         # --- Save & Start ---
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        self._save_btn = QPushButton("Save Config && Start Services")
+        self._save_btn = QPushButton("Install && Configure")
         self._save_btn.setFixedWidth(250)
         self._save_btn.setEnabled(False)
         self._save_btn.setStyleSheet(
@@ -561,8 +835,7 @@ class SetupView(QWidget):
 
     def _save_and_start(self) -> None:
         config = self._build_config()
-        write_config(config)
-        self.setup_complete.emit()
+        self.setup_complete.emit(config)
 
 
 # ── Launcher View ──────────────────────────────────────────
@@ -718,6 +991,7 @@ class UnrealIndexApp(QMainWindow):
         self._setup_view.setup_complete.connect(self._on_setup_done)
         self._stack.addWidget(self._setup_view)
 
+        self._install_view: InstallView | None = None
         self._launcher_view: LauncherView | None = None
 
         if config_exists():
@@ -733,14 +1007,23 @@ class UnrealIndexApp(QMainWindow):
         self._stack.addWidget(self._launcher_view)
         self._stack.setCurrentWidget(self._launcher_view)
 
+    def _show_install(self, config: dict) -> None:
+        if self._install_view is not None:
+            self._install_view.setParent(None)
+            self._install_view.deleteLater()
+        self._install_view = InstallView(config)
+        self._install_view.install_complete.connect(self._show_launcher)
+        self._stack.addWidget(self._install_view)
+        self._stack.setCurrentWidget(self._install_view)
+
     def show_setup(self) -> None:
         self._setup_view = SetupView()
         self._setup_view.setup_complete.connect(self._on_setup_done)
         self._stack.addWidget(self._setup_view)
         self._stack.setCurrentWidget(self._setup_view)
 
-    def _on_setup_done(self) -> None:
-        self._show_launcher()
+    def _on_setup_done(self, config: dict) -> None:
+        self._show_install(config)
 
 
 def main() -> None:
