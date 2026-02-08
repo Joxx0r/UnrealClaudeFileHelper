@@ -454,3 +454,43 @@ def validate_service(port: int, timeout_secs: int = 15) -> tuple[bool, str]:
         time.sleep(1)
 
     return False, f"Service did not start within {timeout_secs}s"
+
+
+def register_mcp_server(
+    on_output: Callable[[str], None] | None = None,
+) -> tuple[bool, str]:
+    """Register unreal-index as an MCP server at user scope (~/.claude.json)."""
+    claude_json_path = Path.home() / ".claude.json"
+
+    # Read existing config or start fresh
+    existing: dict = {}
+    if claude_json_path.exists():
+        try:
+            existing = json.loads(claude_json_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+
+    mcp_servers = existing.setdefault("mcpServers", {})
+
+    # Build the MCP bridge path
+    bridge_js = str(_ROOT / "src" / "bridge" / "mcp-bridge.js").replace("\\", "/")
+    config_path = str(_CONFIG_PATH).replace("\\", "/")
+
+    mcp_servers["unreal-index"] = {
+        "type": "stdio",
+        "command": "node",
+        "args": [bridge_js],
+        "env": {
+            "UNREAL_INDEX_CONFIG": config_path,
+        },
+    }
+
+    try:
+        claude_json_path.write_text(
+            json.dumps(existing, indent=2) + "\n", encoding="utf-8"
+        )
+        if on_output:
+            on_output(f"  Registered 'unreal-index' MCP server in {claude_json_path}")
+        return True, "MCP server registered at user scope"
+    except Exception as e:
+        return False, f"Failed to write {claude_json_path}: {e}"

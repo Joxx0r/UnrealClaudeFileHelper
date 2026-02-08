@@ -47,6 +47,7 @@ from service_manager import (
     install_zoekt_binaries,
     read_config,
     read_port,
+    register_mcp_server,
     start_index_service,
     start_watcher,
     stop_index_service,
@@ -227,6 +228,7 @@ _INSTALL_STEP_LABELS = [
     "Install Zoekt search binaries",
     "Create data directories",
     "Write configuration",
+    "Register MCP server",
     "Validate service",
 ]
 
@@ -298,11 +300,18 @@ class InstallWorker(QThread):
             self.step_completed.emit(5, False, str(e))
             all_ok = False
 
-        # Step 6: Validate service
-        self.step_started.emit(6, "Validating service startup...")
+        # Step 6: Register MCP server
+        self.step_started.emit(6, "Registering MCP server at user scope...")
+        ok, msg = register_mcp_server(lambda o: self.log_output.emit(o))
+        self.step_completed.emit(6, ok, msg)
+        if not ok:
+            all_ok = False
+
+        # Step 7: Validate service
+        self.step_started.emit(7, "Validating service startup...")
         port = int(self._config.get("service", {}).get("port", 3847))
         ok, msg = validate_service(port, timeout_secs=20)
-        self.step_completed.emit(6, ok, msg)
+        self.step_completed.emit(7, ok, msg)
         if not ok:
             self.log_output.emit("  Service did not start. Check WSL and Node.js installation.")
             all_ok = False
