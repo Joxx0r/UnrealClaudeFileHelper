@@ -117,9 +117,13 @@ export class FileWatcher {
           if (this.database.deleteAsset(filePath)) deleted++;
         } else {
           if (this.database.deleteFile(filePath)) deleted++;
-          // Remove from Zoekt mirror
+          // Remove from Zoekt mirror (Windows + WSL)
           if (this.zoektMirror) {
+            const relativePath = this.zoektMirror._toRelativePath(filePath);
             this.zoektMirror.deleteFile(filePath);
+            if (this.zoektManager) {
+              this.zoektManager.deleteWslMirrorFile(relativePath);
+            }
           }
         }
       } else {
@@ -154,9 +158,9 @@ export class FileWatcher {
       console.log(`[Watcher] +${added} ~${changed} -${deleted} (${updates.size} files) — ${ms}ms`);
       this.onUpdate({ added, changed, deleted });
 
-      // Trigger Zoekt re-indexing (debounced)
+      // Trigger Zoekt re-indexing (adaptive debounce based on change volume)
       if (this.zoektManager) {
-        this.zoektManager.triggerReindex();
+        this.zoektManager.triggerReindex(added + changed + deleted);
       }
     }
   }
@@ -299,9 +303,13 @@ export class FileWatcher {
           this.database.insertTrigrams(fileId, trigrams);
         }
 
-        // Update Zoekt mirror with the raw file content
+        // Update Zoekt mirror with the raw file content (Windows + WSL)
         if (this.zoektMirror) {
           this.zoektMirror.updateFile(filePath, fileContent);
+          if (this.zoektManager) {
+            const relativePath = this.zoektMirror._toRelativePath(filePath);
+            this.zoektManager.updateWslMirrorFile(relativePath, fileContent);
+          }
         }
       }
     });

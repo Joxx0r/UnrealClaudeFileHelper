@@ -177,11 +177,22 @@ class UnrealIndexService {
 
         this.zoektMirror = new ZoektMirror(mirrorDir);
 
+        const mirrorProgress = (p) => {
+          console.log(`[Startup] Mirror: ${p.written}/${p.total} (${Math.round(p.written / p.total * 100)}%) — ETA ${p.etaSeconds}s`);
+        };
+
         if (!this.zoektMirror.isReady()) {
-          this.zoektMirror.bootstrapFromDatabase(this.database);
+          this.zoektMirror.bootstrapFromDatabase(this.database, mirrorProgress);
         } else {
           this.zoektMirror.loadPrefix(this.database);
-          console.log('[Startup] Zoekt mirror already bootstrapped');
+          // Verify mirror integrity against database
+          const check = this.zoektMirror.verifyIntegrity(this.database);
+          if (!check.valid) {
+            console.warn(`[Startup] Mirror integrity check failed: ${check.reason}, rebuilding...`);
+            this.zoektMirror.bootstrapFromDatabase(this.database, mirrorProgress);
+          } else {
+            console.log(`[Startup] Mirror OK (${check.mirrorCount} files)`);
+          }
         }
 
         this.zoektManager = new ZoektManager({

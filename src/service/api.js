@@ -1,10 +1,14 @@
 import express from 'express';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const SLOW_QUERY_MS = 100;
 
 export function createApi(database, indexer, queryPool = null, { zoektClient = null, zoektManager = null } = {}) {
   const app = express();
   app.use(express.json());
+  app.use(express.static(join(__dirname, '..', '..', 'public')));
 
   // Compute common path prefix for all indexed files (strip from responses)
   let pathPrefix = '';

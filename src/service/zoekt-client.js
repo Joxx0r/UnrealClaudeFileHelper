@@ -51,6 +51,26 @@ export class ZoektClient {
       return { ...r, file, project, language: 'asset' };
     });
 
+    // Deduplicate: each asset mirror file has multiple metadata lines (name, path, class, etc.)
+    // Zoekt returns one result per matching line — consolidate into one result per asset
+    const deduped = new Map();
+    for (const r of result.results) {
+      const existing = deduped.get(r.file);
+      if (existing) {
+        if (r.match && !existing.matches.includes(r.match)) {
+          existing.matches.push(r.match);
+        }
+      } else {
+        deduped.set(r.file, { ...r, matches: [r.match] });
+      }
+    }
+    result.results = Array.from(deduped.values()).map(({ matches, ...r }) => ({
+      ...r,
+      match: matches.join(' | '),
+      matchedFields: matches.length
+    }));
+    result.totalMatches = result.results.length;
+
     return result;
   }
 
@@ -225,6 +245,23 @@ export class ZoektClient {
         }
       }
     }
+
+    // Rank results: header files and high match-density files first
+    const fileScores = new Map();
+    for (const r of results) {
+      const prev = fileScores.get(r.file) || 0;
+      let score = prev + 1; // +1 per match in same file
+      if (!prev) {
+        if (r.file.endsWith('.h') || r.file.endsWith('.hpp')) score += 5;
+        if (r.file.includes('/Public/')) score += 3;
+      }
+      fileScores.set(r.file, score);
+    }
+    results.sort((a, b) => {
+      const sa = fileScores.get(a.file) || 0;
+      const sb = fileScores.get(b.file) || 0;
+      return sb - sa || a.line - b.line;
+    });
 
     return {
       results,

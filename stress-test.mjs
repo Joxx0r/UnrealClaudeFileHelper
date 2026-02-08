@@ -231,6 +231,71 @@ async function testAssetSearch() {
     record('asset', c.name, data.results?.length >= 0, ms,
       `source=${data.results?.length}, assets=${assetCount}`);
   }
+
+  // Asset deduplication: each asset should appear only once
+  const { data: dedupData, ms: dedupMs } = await query('/grep', { pattern: 'Blueprint', maxResults: 50 });
+  if (dedupData.assets?.length > 0) {
+    const assetFiles = dedupData.assets.map(a => a.file);
+    const uniqueFiles = new Set(assetFiles);
+    record('asset', 'Assets are deduplicated (no duplicate files)', uniqueFiles.size === assetFiles.length, dedupMs,
+      `${assetFiles.length} results, ${uniqueFiles.size} unique files`);
+
+    // Check matchedFields is set
+    const hasMatchedFields = dedupData.assets.some(a => a.matchedFields && a.matchedFields >= 1);
+    record('asset', 'Assets have matchedFields count', hasMatchedFields, 0,
+      dedupData.assets[0]?.matchedFields ? `first asset: matchedFields=${dedupData.assets[0].matchedFields}` : 'missing');
+  }
+}
+
+// ================================================================
+// 7b. RESULT RANKING VALIDATION
+// ================================================================
+async function testResultRanking() {
+  section('7b. Result Ranking');
+
+  // Search for a common term and verify that .h files are ranked higher than .cpp
+  const { data, ms } = await query('/grep', { pattern: 'AActor', maxResults: 50, caseSensitive: 'true' });
+  if (data.results?.length >= 10) {
+    const top10 = data.results.slice(0, 10);
+    const bottom10 = data.results.slice(-10);
+    const topHeaders = top10.filter(r => r.file.endsWith('.h') || r.file.endsWith('.hpp')).length;
+    const bottomHeaders = bottom10.filter(r => r.file.endsWith('.h') || r.file.endsWith('.hpp')).length;
+    record('ranking', 'Header files ranked higher than implementation', topHeaders >= bottomHeaders, ms,
+      `top10 headers=${topHeaders}, bottom10 headers=${bottomHeaders}`);
+
+    // Verify results with more matches per file appear first
+    const fileCounts = new Map();
+    for (const r of data.results) {
+      fileCounts.set(r.file, (fileCounts.get(r.file) || 0) + 1);
+    }
+    if (fileCounts.size >= 2) {
+      const firstFileCount = fileCounts.get(data.results[0].file) || 0;
+      const lastFileCount = fileCounts.get(data.results[data.results.length - 1].file) || 0;
+      record('ranking', 'Higher match density files ranked first', firstFileCount >= lastFileCount, 0,
+        `first file: ${firstFileCount} matches, last file: ${lastFileCount} matches`);
+    }
+  } else {
+    record('ranking', 'Header files ranked higher (insufficient results)', false, ms, `only ${data.results?.length} results`);
+  }
+}
+
+// ================================================================
+// 7c. WEB UI VALIDATION
+// ================================================================
+async function testWebUI() {
+  section('7c. Web UI');
+
+  try {
+    const resp = await fetch(`${BASE}/`);
+    const html = await resp.text();
+    const hasTitle = html.includes('Unreal Index Search');
+    const hasSearchInput = html.includes('id="pattern"');
+    const hasScript = html.includes('doSearch');
+    record('webui', 'Web UI serves at /', resp.status === 200, 0, `${html.length} bytes`);
+    record('webui', 'Web UI has search elements', hasTitle && hasSearchInput && hasScript, 0);
+  } catch (err) {
+    record('webui', 'Web UI accessible', false, 0, err.message);
+  }
 }
 
 // ================================================================
@@ -468,6 +533,8 @@ try {
   await testContextLines();
   await testResultFormat();
   await testAssetSearch();
+  await testResultRanking();
+  await testWebUI();
   await testConcurrentLoad();
   const latencyData = await testSequentialLatency();
   const stabilityData = await testStability();

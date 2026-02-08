@@ -1,4 +1,4 @@
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync, spawnSync } from 'child_process';
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
@@ -444,21 +444,58 @@ export class ZoektManager {
     });
   }
 
-  triggerReindex() {
+  /**
+   * Write a single file to the WSL-native mirror (for incremental updates from watcher).
+   * Individual file writes through WSL are fast — it's bulk operations that are slow.
+   */
+  updateWslMirrorFile(relativePath, content) {
+    if (!this.useWsl || !this.wslMirrorDir) return;
+    try {
+      const normalized = relativePath.replace(/\\/g, '/');
+      const wslPath = `${this.wslMirrorDir}/${normalized}`;
+      const dir = wslPath.slice(0, wslPath.lastIndexOf('/'));
+      execSync(`wsl -d Ubuntu -- bash -c "mkdir -p '${dir}'"`, { timeout: 5000, stdio: 'pipe' });
+      spawnSync('wsl', ['-d', 'Ubuntu', '--', 'bash', '-c', `cat > '${wslPath}'`], {
+        input: typeof content === 'string' ? content : content.toString('utf-8'),
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+    } catch (err) {
+      console.warn(`[ZoektManager] WSL mirror update failed for ${relativePath}: ${err.message}`);
+    }
+  }
+
+  deleteWslMirrorFile(relativePath) {
+    if (!this.useWsl || !this.wslMirrorDir) return;
+    try {
+      const normalized = relativePath.replace(/\\/g, '/');
+      const wslPath = `${this.wslMirrorDir}/${normalized}`;
+      execSync(`wsl -d Ubuntu -- bash -c "rm -f '${wslPath}'"`, { timeout: 5000, stdio: 'pipe' });
+    } catch {}
+  }
+
+  triggerReindex(changeCount = 1) {
     if (!this.mirrorRoot) return;
+    this._pendingChangeCount = (this._pendingChangeCount || 0) + changeCount;
 
     if (this.reindexTimer) {
       clearTimeout(this.reindexTimer);
     }
 
+    // Adaptive debounce: 2s for small changes, up to 30s for large batches
+    const debounce = Math.min(30000, 2000 + this._pendingChangeCount * 200);
+
     this.reindexTimer = setTimeout(async () => {
+      const count = this._pendingChangeCount;
+      this._pendingChangeCount = 0;
       this.reindexTimer = null;
+      console.log(`[ZoektManager] Reindexing after ${count} change(s)...`);
       try {
         await this.runIndex(this.mirrorRoot);
       } catch (err) {
         console.error(`[ZoektManager] Reindex failed: ${err.message}`);
       }
-    }, this.reindexDebounceMs);
+    }, debounce);
   }
 
   isAvailable() {

@@ -17,7 +17,7 @@ export class ZoektMirror {
     return this.mirrorDir;
   }
 
-  bootstrapFromDatabase(database) {
+  bootstrapFromDatabase(database, onProgress = null) {
     const startMs = performance.now();
     console.log('[ZoektMirror] Bootstrapping mirror from database...');
 
@@ -48,6 +48,7 @@ export class ZoektMirror {
        WHERE f.language NOT IN ('content')`
     ).all();
 
+    const total = rows.length;
     let written = 0;
     let assetCount = 0;
     let errors = 0;
@@ -63,6 +64,13 @@ export class ZoektMirror {
         writeFileSync(fullPath, content);
         written++;
         if (isAsset) assetCount++;
+
+        // Progress reporting every 5000 files
+        if (onProgress && written % 5000 === 0) {
+          const elapsed = (performance.now() - startMs) / 1000;
+          const rate = written / elapsed;
+          onProgress({ written, total, rate: Math.round(rate), etaSeconds: Math.ceil((total - written) / rate) });
+        }
       } catch (err) {
         errors++;
         if (errors <= 5) {
@@ -82,6 +90,26 @@ export class ZoektMirror {
     const durationS = ((performance.now() - startMs) / 1000).toFixed(1);
     console.log(`[ZoektMirror] Bootstrap complete: ${written} files written (${assetCount} assets), ${errors} errors (${durationS}s)`);
     return written;
+  }
+
+  verifyIntegrity(database) {
+    if (!this.isReady()) {
+      return { valid: false, reason: 'no marker file' };
+    }
+    try {
+      const manifest = JSON.parse(readFileSync(this.markerPath, 'utf-8'));
+      const dbCount = database.db.prepare(
+        "SELECT COUNT(*) as c FROM file_content fc JOIN files f ON f.id = fc.file_id WHERE f.language != 'content'"
+      ).get().c;
+
+      const drift = dbCount > 0 ? Math.abs(dbCount - manifest.fileCount) / dbCount : 0;
+      if (drift > 0.05) {
+        return { valid: false, reason: `count mismatch: db=${dbCount}, mirror=${manifest.fileCount} (${(drift * 100).toFixed(1)}% drift)` };
+      }
+      return { valid: true, dbCount, mirrorCount: manifest.fileCount };
+    } catch (err) {
+      return { valid: false, reason: `marker parse error: ${err.message}` };
+    }
   }
 
   loadPrefix(database) {
