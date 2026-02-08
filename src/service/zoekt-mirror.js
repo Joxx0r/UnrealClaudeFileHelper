@@ -32,7 +32,7 @@ export class ZoektMirror {
     const projectPrefixes = this._computeProjectPrefixes(database);
 
     const rows = database.db.prepare(
-      `SELECT fc.content, f.path, f.language, f.project FROM file_content fc
+      `SELECT fc.content, f.path, f.language, f.project, f.relative_path FROM file_content fc
        JOIN files f ON f.id = fc.file_id
        WHERE f.language NOT IN ('content')`
     ).all();
@@ -48,7 +48,9 @@ export class ZoektMirror {
         const isAsset = row.language === 'asset';
         const relativePath = isAsset
           ? this._toAssetMirrorPath(row.path)
-          : this._toProjectRelativePath(row.path, row.project, projectPrefixes);
+          : (row.relative_path
+              ? row.project + '/' + row.relative_path
+              : this._toProjectRelativePath(row.path, row.project, projectPrefixes));
 
         const fullPath = join(this.mirrorDir, relativePath);
         mkdirSync(dirname(fullPath), { recursive: true });

@@ -73,7 +73,7 @@ export class ZoektClient {
         deduped.set(r.file, { ...r, matches: [r.match] });
       }
     }
-    result.results = Array.from(deduped.values()).map(({ matches, ...r }) => ({
+    result.results = Array.from(deduped.values()).map(({ matches, line, context, ...r }) => ({
       ...r,
       match: matches.join(' | '),
       matchedFields: matches.length

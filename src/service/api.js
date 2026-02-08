@@ -227,7 +227,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
           }
 
           database.transaction(() => {
-            const fileId = database.upsertFile(file.path, file.project, file.module, file.mtime, file.language);
+            const fileId = database.upsertFile(file.path, file.project, file.module, file.mtime, file.language, file.relativePath || null);
             database.clearTypesForFile(fileId);
 
             if (file.types && file.types.length > 0) {

@@ -266,18 +266,18 @@ class UnrealIndexBridge {
           },
           {
             name: 'unreal_find_asset',
-            description: 'Find Unreal assets (Blueprints, Materials, Maps, DataAssets, etc.) by name. Returns content browser paths, asset class type, and parent class for Blueprints. Works offline without a running editor.',
+            description: 'Find Unreal assets (Blueprints, Materials, Maps, DataAssets, etc.) by name. Searches 400K+ indexed assets. Returns content browser paths, asset class type, and parent class for Blueprints. By default uses partial matching (fuzzy=true) — set fuzzy=false only when you need an exact name match. Works offline without a running editor.',
             inputSchema: {
               type: 'object',
               properties: {
                 name: {
                   type: 'string',
-                  description: 'Asset name to search for (e.g. BP_ATK_MapBorder, M_Highlight, MI_Default)'
+                  description: 'Asset name to search for (e.g. BP_ATK_MapBorder, M_Highlight, MI_Default). Partial names work with fuzzy=true (default).'
                 },
                 fuzzy: {
                   type: 'boolean',
-                  default: false,
-                  description: 'Enable fuzzy/partial matching'
+                  default: true,
+                  description: 'Enable partial/substring matching (default: true). Set to false for exact name match only.'
                 },
                 project: {
                   type: 'string',
@@ -457,7 +457,7 @@ class UnrealIndexBridge {
           case 'unreal_find_asset': {
             const result = await fetchService('/find-asset', {
               name: args.name,
-              fuzzy: args.fuzzy,
+              fuzzy: args.fuzzy !== false,
               project: args.project,
               folder: args.folder,
               maxResults: args.maxResults

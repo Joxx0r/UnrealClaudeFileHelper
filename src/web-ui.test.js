@@ -69,7 +69,7 @@ describe('ZoektClient query building', () => {
 
   it('should add project filter', () => {
     const q = client._buildQuery('test', { caseSensitive: true, project: 'MyProject' });
-    assert.ok(q.includes('file:MyProject/'), 'should filter by project path');
+    assert.ok(q.includes('repo:^MyProject$'), 'should filter by project repo');
   });
 
   it('should detect regex metacharacters', () => {

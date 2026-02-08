@@ -210,6 +210,14 @@ export class IndexDatabase {
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_assets_parent_class ON assets(parent_class)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_assets_asset_class ON assets(asset_class)`);
 
+    // Migrate files table to include relative_path column
+    const hasRelativePathColumn = this.db.prepare(`
+      SELECT COUNT(*) as count FROM pragma_table_info('files') WHERE name = 'relative_path'
+    `).get().count > 0;
+    if (!hasRelativePathColumn) {
+      this.db.exec(`ALTER TABLE files ADD COLUMN relative_path TEXT`);
+    }
+
     const hasMembersTable = this.db.prepare(`
       SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='members'
     `).get().count > 0;
@@ -347,18 +355,19 @@ export class IndexDatabase {
     return result;
   }
 
-  upsertFile(path, project, module, mtime, language = 'angelscript') {
+  upsertFile(path, project, module, mtime, language = 'angelscript', relativePath = null) {
     const stmt = this.db.prepare(`
-      INSERT INTO files (path, project, module, mtime, language)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO files (path, project, module, mtime, language, relative_path)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(path) DO UPDATE SET
         project = excluded.project,
         module = excluded.module,
         mtime = excluded.mtime,
-        language = excluded.language
+        language = excluded.language,
+        relative_path = COALESCE(excluded.relative_path, relative_path)
       RETURNING id
     `);
-    return stmt.get(path, project, module, mtime, language).id;
+    return stmt.get(path, project, module, mtime, language, relativePath).id;
   }
 
   deleteFile(path) {
@@ -927,7 +936,7 @@ export class IndexDatabase {
       }
 
       if (results.length > maxResults) results.length = maxResults;
-      return { results, truncated: results.length >= maxResults, parentFound };
+      return { results, truncated: results.length >= maxResults, totalChildren: results.length, parentFound };
     }
 
     // Phase 1: Traverse full inheritance tree WITHOUT project/language filter
@@ -1016,11 +1025,10 @@ export class IndexDatabase {
       results.push(...this.db.prepare(assetSql).all(...assetParams));
     }
 
-    const totalChildren = children.size;
     if (results.length > maxResults) results.length = maxResults;
     const truncated = results.length >= maxResults;
 
-    return { results, truncated, totalChildren, parentFound };
+    return { results, truncated, totalChildren: results.length, parentFound };
   }
 
   browseModule(modulePath, options = {}) {
