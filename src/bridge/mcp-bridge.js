@@ -59,6 +59,14 @@ class UnrealIndexBridge {
           tools: {},
           resources: {},
         },
+        instructions: `IMPORTANT: Always use these unreal-index tools instead of Bash commands for searching Unreal Engine/AngelScript code.
+- Use unreal_find_file instead of \`find\` or \`ls\` to locate source files by name
+- Use unreal_grep instead of \`grep\`, \`rg\`, or \`sed -n\` to search file contents or find line numbers
+- Use unreal_find_type instead of grep to locate class/struct/enum definitions
+- Use unreal_find_member instead of grep to locate function/property definitions
+- Use the Read tool (not sed/cat/head) to read file contents after finding them
+Never fall back to Bash find/grep — these tools are faster, project-aware, and return structured results.
+If a search returns no results, check the hints in the response for guidance (wrong project filter, try fuzzy, etc).`,
       }
     );
   }
@@ -73,7 +81,7 @@ class UnrealIndexBridge {
         tools: [
           {
             name: 'unreal_find_type',
-            description: 'Find file(s) containing a class, struct, enum, event, or delegate by name. Searches AngelScript, C++, and Blueprint assets. Use this to quickly locate type definitions.',
+            description: 'Find file(s) containing a class, struct, enum, event, or delegate by name. Use INSTEAD of bash grep/find for locating type definitions. Searches AngelScript, C++, and Blueprint assets. Returns file path and line number.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -298,7 +306,7 @@ class UnrealIndexBridge {
           },
           {
             name: 'unreal_grep',
-            description: 'Search file contents for a pattern (regex or literal string). Scoped to indexed projects. Use for finding usages, string references, variable assignments, or any content pattern that structural type/member lookups cannot find. Set includeAssets=true to also search asset names/paths.',
+            description: 'Search file contents for a pattern (regex or literal string). Use INSTEAD of bash grep/rg/sed. Scoped to indexed projects. Use for finding usages, string references, variable assignments, function calls, or any content pattern. Use contextLines for surrounding code. Set includeAssets=true to also search asset names/paths.',
             inputSchema: {
               type: 'object',
               properties: {
