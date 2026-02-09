@@ -9,6 +9,40 @@ import { contentHash } from './trigram.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SLOW_QUERY_MS = 100;
 
+/** Validate project parameter, returning a 400 response if invalid. Returns true if invalid (response sent). */
+function validateProject(database, project, res) {
+  if (project && !database.projectExists(project)) {
+    const available = database.getDistinctProjects();
+    res.status(400).json({ error: `Unknown project: ${project}. Available projects: ${available.join(', ')}` });
+    return true;
+  }
+  return false;
+}
+
+/** Build hints array for empty search results to guide agents. */
+function buildEmptyResultHints(database, { project, fuzzy, supportsFuzzy = false }) {
+  const hints = [];
+  if (project) {
+    hints.push(`No results in project '${project}'. Try removing the project filter to search all projects.`);
+  }
+  if (supportsFuzzy && !fuzzy) {
+    hints.push('Try fuzzy=true for partial name matching.');
+  }
+  const available = database.getDistinctProjects();
+  if (available.length > 0) {
+    hints.push(`Available projects: ${available.join(', ')}`);
+  }
+  return hints;
+}
+
+/** Extract basename from a full path if path separators are present. */
+function extractFilename(input) {
+  if (input.includes('/') || input.includes('\\')) {
+    return input.split(/[/\\]/).pop() || input;
+  }
+  return input;
+}
+
 export function createApi(database, indexer, queryPool = null, { zoektClient = null, zoektManager = null, zoektMirror = null } = {}) {
   const app = express();
   app.use(express.json({ limit: '50mb' }));
@@ -389,6 +423,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
+      if (validateProject(database, project, res)) return;
 
       const mr = parseInt(maxResults, 10) || 10;
 
@@ -406,7 +441,11 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         if (r.path) r.path = cleanPath(r.path, r.project);
         if (r.implementationPath) r.implementationPath = cleanPath(r.implementationPath, r.project);
       });
-      res.json({ results });
+      const response = { results };
+      if (results.length === 0) {
+        response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true });
+      }
+      res.json(response);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -419,6 +458,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!parent) {
         return res.status(400).json({ error: 'parent parameter required' });
       }
+      if (validateProject(database, project, res)) return;
 
       const opts = {
         recursive: recursive !== 'false',
@@ -429,6 +469,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
       const result = await poolQuery('findChildrenOf', [parent, opts]);
       if (result.results) result.results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
+      if (result.results && result.results.length === 0) {
+        result.hints = buildEmptyResultHints(database, { project });
+      }
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -442,6 +485,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!module) {
         return res.status(400).json({ error: 'module parameter required' });
       }
+      if (validateProject(database, project, res)) return;
 
       const opts = {
         project: project || null,
@@ -452,6 +496,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const result = await poolQuery('browseModule', [module, opts]);
       if (result.types) result.types.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
       if (result.files) result.files = result.files.map(f => cleanPath(f));
+      if ((!result.types || result.types.length === 0) && (!result.files || result.files.length === 0)) {
+        result.hints = buildEmptyResultHints(database, { project });
+      }
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -460,11 +507,14 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.get('/find-file', async (req, res) => {
     try {
-      const { filename, project, language, maxResults } = req.query;
+      const { filename: rawFilename, project, language, maxResults } = req.query;
 
-      if (!filename) {
+      if (!rawFilename) {
         return res.status(400).json({ error: 'filename parameter required' });
       }
+      if (validateProject(database, project, res)) return;
+
+      const filename = extractFilename(rawFilename);
 
       const opts = {
         project: project || null,
@@ -474,7 +524,11 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
       const results = await poolQuery('findFileByName', [filename, opts]);
       results.forEach(r => { if (r.file) r.file = cleanPath(r.file, r.project); });
-      res.json({ results });
+      const response = { results };
+      if (results.length === 0) {
+        response.hints = buildEmptyResultHints(database, { project });
+      }
+      res.json(response);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -522,6 +576,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
+      if (validateProject(database, project, res)) return;
 
       const mr = parseInt(maxResults, 10) || 20;
 
@@ -537,7 +592,11 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
       const results = await poolQuery('findMember', [name, opts]);
       results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
-      res.json({ results });
+      const response = { results };
+      if (results.length === 0) {
+        response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true });
+      }
+      res.json(response);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -569,6 +628,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (!name) {
         return res.status(400).json({ error: 'name parameter required' });
       }
+      if (validateProject(database, project, res)) return;
 
       const opts = {
         fuzzy: fuzzy === 'true',
@@ -578,7 +638,11 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       };
 
       const results = await poolQuery('findAssetByName', [name, opts]);
-      res.json({ results });
+      const response = { results };
+      if (results.length === 0) {
+        response.hints = buildEmptyResultHints(database, { project, fuzzy: opts.fuzzy, supportsFuzzy: true });
+      }
+      res.json(response);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -723,9 +787,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       return res.status(400).json({ error: `Invalid regex: ${e.message}` });
     }
 
-    if (project && !database.projectExists(project)) {
-      return res.status(400).json({ error: `Unknown project: ${project}` });
-    }
+    if (validateProject(database, project, res)) return;
 
     if (language === 'blueprint') {
       return res.status(400).json({ error: 'Blueprint content is binary and not text-searchable. Use find_type or find_asset to search blueprints by name.' });

@@ -179,7 +179,7 @@ class UnrealIndexBridge {
           },
           {
             name: 'unreal_find_file',
-            description: 'Find source files by filename. Searches AngelScript (.as), C++ (.h, .cpp), and config (.ini) files.',
+            description: 'Find source files by filename. Searches AngelScript (.as), C++ (.h, .cpp), and config (.ini) files. Pass only the filename (not a full path). If no results with a project filter, retry without it. Do NOT fall back to bash find commands.',
             inputSchema: {
               type: 'object',
               properties: {

@@ -429,6 +429,10 @@ export class IndexDatabase {
     return !!this.db.prepare('SELECT 1 FROM files WHERE project = ? LIMIT 1').get(project);
   }
 
+  getDistinctProjects() {
+    return this.db.prepare('SELECT DISTINCT project FROM files ORDER BY project').pluck().all();
+  }
+
   getFilteredFiles(project, language) {
     let sql = "SELECT * FROM files WHERE language NOT IN ('content', 'asset')";
     const params = [];
