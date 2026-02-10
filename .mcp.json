@@ -1,6 +1,8 @@
 {
-  "unreal-index": {
-    "command": "node",
-    "args": ["D:\\p4\\games\\Games\\Tools\\unreal-index\\src\\server.js"]
+  "mcpServers": {
+    "unreal-index": {
+      "command": "node",
+      "args": ["src/bridge/mcp-bridge.js"]
+    }
   }
 }
