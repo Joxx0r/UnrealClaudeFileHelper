@@ -2,7 +2,8 @@ import express from 'express';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { deflateSync } from 'zlib';
-import { writeFileSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync } from 'fs';
+import { spawn } from 'child_process';
 import { rankResults, groupResultsByFile } from './search-ranking.js';
 import { contentHash } from './trigram.js';
 
@@ -442,6 +443,50 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       }
     }
     res.json({ ok: true });
+  });
+
+  app.post('/internal/start-watcher', (req, res) => {
+    // Check if a watcher is already active
+    const cutoff = Date.now() - 45000;
+    for (const [, w] of watcherState.watchers) {
+      if (new Date(w.receivedAt).getTime() > cutoff) {
+        return res.status(409).json({ error: 'Watcher already active', watcherId: w.watcherId });
+      }
+    }
+
+    // Read config to get Windows repo dir
+    let config;
+    try {
+      const configPath = join(__dirname, '..', '..', 'config.json');
+      config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    } catch {
+      return res.status(500).json({ error: 'Could not read config.json' });
+    }
+
+    const winRepoDir = config.watcher?.windowsRepoDir;
+    if (!winRepoDir) {
+      return res.status(500).json({ error: 'watcher.windowsRepoDir not set in config.json' });
+    }
+
+    // The watcher runs on Windows — spawn via cmd.exe from WSL
+    const watcherScript = `${winRepoDir}\\src\\watcher\\watcher-client.js`;
+    const configFile = `${winRepoDir}\\config.json`;
+
+    try {
+      const child = spawn('/mnt/c/Windows/System32/cmd.exe', ['/c', 'start', '/b', 'node', watcherScript, configFile], {
+        detached: true,
+        stdio: 'ignore'
+      });
+      child.on('error', err => {
+        console.error(`[API] Watcher spawn error: ${err.message}`);
+      });
+      child.unref();
+      console.log(`[API] Started watcher via cmd.exe: node ${watcherScript}`);
+      res.json({ ok: true, message: 'Watcher process started' });
+    } catch (err) {
+      console.error(`[API] Failed to start watcher: ${err.message}`);
+      res.status(500).json({ error: `Failed to start watcher: ${err.message}` });
+    }
   });
 
   app.get('/status', (req, res) => {

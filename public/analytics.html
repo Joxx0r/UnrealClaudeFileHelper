@@ -104,6 +104,44 @@
       await Promise.all([loadHealth(), loadAnalytics(), loadWatcher()]);
     }
 
+    async function startWatcher() {
+      const btn = document.getElementById('start-watcher-btn');
+      const msg = document.getElementById('start-watcher-msg');
+      if (btn) btn.disabled = true;
+      if (msg) msg.textContent = 'Starting...';
+      try {
+        const resp = await fetch('/internal/start-watcher', { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok) {
+          if (msg) msg.textContent = data.error || 'Failed to start';
+          if (btn) btn.disabled = false;
+          return;
+        }
+        if (msg) msg.textContent = 'Started! Waiting for heartbeat...';
+        // Poll until watcher becomes active (up to 30s)
+        let attempts = 0;
+        const poll = setInterval(async () => {
+          attempts++;
+          try {
+            const sr = await fetch('/watcher-status');
+            const sd = await sr.json();
+            if (sd.hasActiveWatcher) {
+              clearInterval(poll);
+              loadWatcher();
+            }
+          } catch {}
+          if (attempts >= 15) {
+            clearInterval(poll);
+            if (msg) msg.textContent = 'Started but no heartbeat yet — check console';
+            if (btn) btn.disabled = false;
+          }
+        }, 2000);
+      } catch (err) {
+        if (msg) msg.textContent = 'Error: ' + err.message;
+        if (btn) btn.disabled = false;
+      }
+    }
+
     async function loadWatcher() {
       const watcherEl = document.getElementById('watcher');
       const freshnessEl = document.getElementById('freshness');
@@ -137,8 +175,12 @@
               <span class="stat-label">Status</span>
               <span class="stat-value health-err">no watcher connected</span>
             </div>
-            <div style="margin-top:8px;font-size:12px;color:#808080">
-              Start the watcher: <code style="color:#ce9178">node src/watcher/watcher-client.js</code>
+            <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
+              <button onclick="startWatcher()" id="start-watcher-btn"
+                style="padding:6px 16px;background:#0e639c;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px">
+                Start Watcher
+              </button>
+              <span id="start-watcher-msg" style="font-size:12px;color:#808080"></span>
             </div>
           `;
         }
