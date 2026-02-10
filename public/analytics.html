@@ -56,10 +56,22 @@
   </div>
 
   <div class="grid">
+    <!-- Watcher Status -->
+    <div class="card">
+      <h2>Watcher Status</h2>
+      <div id="watcher" class="loading">Loading...</div>
+    </div>
+
     <!-- Health & Status -->
     <div class="card">
       <h2>Service Health</h2>
       <div id="health" class="loading">Loading...</div>
+    </div>
+
+    <!-- Project Freshness -->
+    <div class="card card-full">
+      <h2>Project Freshness</h2>
+      <div id="freshness" class="loading">Loading...</div>
     </div>
 
     <!-- Overview stats -->
@@ -89,7 +101,72 @@
 
   <script>
     async function loadAll() {
-      await Promise.all([loadHealth(), loadAnalytics()]);
+      await Promise.all([loadHealth(), loadAnalytics(), loadWatcher()]);
+    }
+
+    async function loadWatcher() {
+      const watcherEl = document.getElementById('watcher');
+      const freshnessEl = document.getElementById('freshness');
+      try {
+        const resp = await fetch('/watcher-status');
+        const data = await resp.json();
+        const active = data.hasActiveWatcher;
+        const w = data.watchers[0]; // primary watcher
+
+        if (w) {
+          const uptime = w.startedAt ? formatRelative(w.startedAt) : '—';
+          const lastIngest = w.counters?.lastIngestAt ? formatRelative(w.counters.lastIngestAt) : 'never';
+          const nextReconcile = w.reconciliation?.nextRunAt ? formatRelative(w.reconciliation.nextRunAt, true) : '—';
+          watcherEl.innerHTML = `
+            <div class="stat-row">
+              <span class="stat-label">Status</span>
+              <span class="stat-value ${active ? 'health-ok' : 'health-err'}">${active ? 'active' : 'inactive'}</span>
+            </div>
+            <div class="stat-row"><span class="stat-label">Watcher ID</span><span class="stat-value">${esc(w.watcherId)}</span></div>
+            <div class="stat-row"><span class="stat-label">Started</span><span class="stat-value">${uptime}</span></div>
+            <div class="stat-row"><span class="stat-label">Files ingested</span><span class="stat-value">${(w.counters?.filesIngested || 0).toLocaleString()}</span></div>
+            <div class="stat-row"><span class="stat-label">Assets ingested</span><span class="stat-value">${(w.counters?.assetsIngested || 0).toLocaleString()}</span></div>
+            <div class="stat-row"><span class="stat-label">Errors</span><span class="stat-value ${w.counters?.errorsCount > 0 ? 'health-warn' : ''}">${w.counters?.errorsCount || 0}</span></div>
+            <div class="stat-row"><span class="stat-label">Last ingest</span><span class="stat-value">${lastIngest}</span></div>
+            <div class="stat-row"><span class="stat-label">Next reconcile</span><span class="stat-value">${nextReconcile}</span></div>
+            ${data.watchers.length > 1 ? `<div class="stat-row"><span class="stat-label health-warn">Warning</span><span class="stat-value health-warn">${data.watchers.length} watchers connected</span></div>` : ''}
+          `;
+        } else {
+          watcherEl.innerHTML = `
+            <div class="stat-row">
+              <span class="stat-label">Status</span>
+              <span class="stat-value health-err">no watcher connected</span>
+            </div>
+            <div style="margin-top:8px;font-size:12px;color:#808080">
+              Start the watcher: <code style="color:#ce9178">node src/watcher/watcher-client.js</code>
+            </div>
+          `;
+        }
+
+        // Project freshness table
+        if (data.projectFreshness && data.projectFreshness.length > 0) {
+          freshnessEl.innerHTML = `
+            <table>
+              <tr><th>Project</th><th>Last File Modified</th><th>Last Ingest</th></tr>
+              ${data.projectFreshness.map(p => {
+                const age = p.lastFileModified ? formatRelative(p.lastFileModified) : '—';
+                const ageMs = p.lastFileModified ? Date.now() - new Date(p.lastFileModified).getTime() : Infinity;
+                const cls = ageMs > 86400000 ? 'health-err' : ageMs > 3600000 ? 'health-warn' : 'health-ok';
+                return `<tr>
+                  <td>${esc(p.project)}</td>
+                  <td class="${cls}">${age}</td>
+                  <td>${data.lastIngestAt ? formatRelative(data.lastIngestAt) : '—'}</td>
+                </tr>`;
+              }).join('')}
+            </table>
+          `;
+        } else {
+          freshnessEl.innerHTML = '<span class="loading">No project data</span>';
+        }
+      } catch (err) {
+        watcherEl.innerHTML = `<span class="error">Failed to load: ${esc(err.message)}</span>`;
+        freshnessEl.innerHTML = `<span class="error">Failed to load</span>`;
+      }
     }
 
     async function loadHealth() {
@@ -221,6 +298,19 @@
       return s.length > max ? s.slice(0, max) + '...' : s;
     }
 
+    function formatRelative(ts, future = false) {
+      if (!ts) return '—';
+      const diff = future
+        ? new Date(ts).getTime() - Date.now()
+        : Date.now() - new Date(ts).getTime();
+      if (diff < 0 && !future) return 'just now';
+      const abs = Math.abs(diff);
+      if (abs < 60000) return Math.round(abs / 1000) + 's ago';
+      if (abs < 3600000) return Math.round(abs / 60000) + 'm ago';
+      if (abs < 86400000) return Math.round(abs / 3600000) + 'h ago';
+      return Math.round(abs / 86400000) + 'd ago';
+    }
+
     function esc(s) {
       if (!s) return '';
       const d = document.createElement('div');
@@ -229,6 +319,7 @@
     }
 
     loadAll();
+    setInterval(loadAll, 15000); // Auto-refresh every 15s
   </script>
 </body>
 </html>

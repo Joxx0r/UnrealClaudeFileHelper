@@ -50,7 +50,7 @@
 </head>
 <body>
   <div class="header">
-    <h1>Unreal Index Search</h1>
+    <h1>Unreal Index Search <span id="watcher-dot" title="Watcher: checking..." style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#808080;margin-left:4px;vertical-align:middle"></span></h1>
     <a class="nav-link" href="/analytics.html">Analytics</a>
   </div>
   <div class="search-bar">
@@ -242,6 +242,28 @@
       d.textContent = s;
       return d.innerHTML;
     }
+
+    // --- Watcher status dot ---
+    async function checkWatcher() {
+      const dot = $('watcher-dot');
+      try {
+        const resp = await fetch('/watcher-status');
+        if (!resp.ok) throw new Error(resp.statusText);
+        const data = await resp.json();
+        if (data.hasActiveWatcher) {
+          dot.style.background = '#4ec9b0';
+          dot.title = 'Watcher: active';
+        } else {
+          dot.style.background = '#f44747';
+          dot.title = 'Watcher: inactive';
+        }
+      } catch {
+        dot.style.background = '#808080';
+        dot.title = 'Watcher: unknown (service error)';
+      }
+    }
+    checkWatcher();
+    setInterval(checkWatcher, 30000);
   </script>
 </body>
 </html>

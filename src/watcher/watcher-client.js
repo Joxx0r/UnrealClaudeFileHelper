@@ -24,6 +24,21 @@ const SERVICE_URL = config.service?.url || `http://${config.service?.host || '12
 const DEBOUNCE_MS = config.watcher?.debounceMs || 100;
 const MAX_CONCURRENT = 10;
 const BATCH_SIZE = 50;
+const HEARTBEAT_INTERVAL_MS = 15000;
+const RECONCILE_INTERVAL_MS = (config.watcher?.reconcileIntervalMinutes || 10) * 60 * 1000;
+
+// --- Watcher telemetry ---
+
+import { hostname } from 'os';
+const startupTimestamp = new Date().toISOString();
+const watcherId = `${hostname()}-${process.pid}`;
+let totalFilesIngested = 0;
+let totalAssetsIngested = 0;
+let totalDeletes = 0;
+let totalErrors = 0;
+let lastIngestTimestamp = null;
+let lastReconcileTimestamp = null;
+let nextReconcileTimestamp = null;
 
 // --- Utility functions ---
 
@@ -454,8 +469,14 @@ function startWatcher() {
         const result = await postJson(`${SERVICE_URL}/internal/ingest`, { files, assets, deletes });
         const ms = (performance.now() - start).toFixed(1);
         console.log(`[Watcher] +${files.length} assets:${assets.length} -${deletes.length} → ${result.processed} processed (${ms}ms)`);
+        // Update telemetry counters
+        totalFilesIngested += files.length;
+        totalAssetsIngested += assets.length;
+        totalDeletes += deletes.length;
+        lastIngestTimestamp = new Date().toISOString();
       } catch (err) {
         console.error(`[Watcher] POST failed, re-queuing: ${err.message}`);
+        totalErrors++;
         // Re-queue for retry
         for (const [k, v] of updates) pendingUpdates.set(k, v);
         debounceTimer = setTimeout(processUpdates, 5000);
@@ -515,6 +536,64 @@ async function main() {
   }
 
   startWatcher();
+
+  // --- Heartbeat: send watcher status to service every 15s ---
+
+  async function sendHeartbeat() {
+    try {
+      await postJson(`${SERVICE_URL}/internal/heartbeat`, {
+        watcherId,
+        startedAt: startupTimestamp,
+        watchedPaths: config.projects.reduce((n, p) => n + p.paths.length, 0),
+        projects: config.projects.map(p => ({
+          name: p.name,
+          language: p.language,
+          pathCount: p.paths.length
+        })),
+        counters: {
+          filesIngested: totalFilesIngested,
+          assetsIngested: totalAssetsIngested,
+          deletesProcessed: totalDeletes,
+          errorsCount: totalErrors,
+          lastIngestAt: lastIngestTimestamp
+        },
+        reconciliation: {
+          lastRunAt: lastReconcileTimestamp,
+          nextRunAt: nextReconcileTimestamp
+        }
+      });
+    } catch {
+      // Fire-and-forget — don't log noise for missed heartbeats
+    }
+  }
+
+  sendHeartbeat();
+  setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+  console.log(`[Watcher] Heartbeat started (every ${HEARTBEAT_INTERVAL_MS / 1000}s)`);
+
+  // --- Periodic reconciliation: catch missed file changes ---
+
+  lastReconcileTimestamp = new Date().toISOString();
+  nextReconcileTimestamp = new Date(Date.now() + RECONCILE_INTERVAL_MS).toISOString();
+
+  async function periodicReconcile() {
+    console.log(`[Watcher] Starting periodic reconciliation...`);
+    const start = performance.now();
+    for (const project of config.projects) {
+      try {
+        await reconcile(project);
+      } catch (err) {
+        console.error(`[Watcher] Periodic reconcile failed for ${project.name}: ${err.message}`);
+      }
+    }
+    const s = ((performance.now() - start) / 1000).toFixed(1);
+    console.log(`[Watcher] Periodic reconciliation complete (${s}s)`);
+    lastReconcileTimestamp = new Date().toISOString();
+    nextReconcileTimestamp = new Date(Date.now() + RECONCILE_INTERVAL_MS).toISOString();
+  }
+
+  setInterval(periodicReconcile, RECONCILE_INTERVAL_MS);
+  console.log(`[Watcher] Periodic reconciliation scheduled (every ${RECONCILE_INTERVAL_MS / 60000}min)`);
 }
 
 main().catch(err => {

@@ -32,6 +32,13 @@ class GrepCache {
 
 const grepCache = new GrepCache(200, 30000);
 
+// Watcher heartbeat state — in-memory only, not persisted
+const watcherState = {
+  watchers: new Map(),   // watcherId → { ...payload, receivedAt }
+  lastIngestAt: null,
+  ingestCounts: { total: 0, files: 0, assets: 0, deletes: 0 }
+};
+
 /** Validate project parameter, returning a 400 response if invalid. Returns true if invalid (response sent). */
 function validateProject(database, project, res) {
   if (project && !database.projectExists(project)) {
@@ -169,6 +176,43 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       response.zoekt = zoektManager.getStatus();
     }
     res.json(response);
+  });
+
+  // --- Watcher status (public, consumed by GUI) ---
+
+  app.get('/watcher-status', (req, res) => {
+    const watchers = [];
+    const cutoff = Date.now() - 45000; // 3 missed heartbeats = stale
+
+    for (const [id, w] of watcherState.watchers) {
+      const receivedMs = new Date(w.receivedAt).getTime();
+      watchers.push({
+        ...w,
+        status: receivedMs > cutoff ? 'active' : 'stale'
+      });
+    }
+
+    // Per-project freshness from DB (last mtime per project)
+    let projectFreshness = [];
+    try {
+      const rows = database.db.prepare(`
+        SELECT project, MAX(mtime) as lastMtime
+        FROM files WHERE language != 'asset'
+        GROUP BY project
+      `).all();
+      projectFreshness = rows.map(p => ({
+        project: p.project,
+        lastFileModified: p.lastMtime || null
+      }));
+    } catch {}
+
+    res.json({
+      hasActiveWatcher: watchers.some(w => w.status === 'active'),
+      watchers,
+      lastIngestAt: watcherState.lastIngestAt,
+      ingestCounts: watcherState.ingestCounts,
+      projectFreshness
+    });
   });
 
   // --- Internal endpoints (watcher → service communication) ---
@@ -347,6 +391,13 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
         grepCache.invalidate();
       }
 
+      // Track ingest activity for watcher status
+      watcherState.lastIngestAt = new Date().toISOString();
+      watcherState.ingestCounts.total += processed;
+      watcherState.ingestCounts.files += files.length;
+      watcherState.ingestCounts.assets += assets.length;
+      watcherState.ingestCounts.deletes += deletes.length;
+
       // Trigger Zoekt reindex for affected projects
       if (zoektManager && affectedProjects.size > 0) {
         zoektManager.triggerReindex(processed, affectedProjects);
@@ -372,6 +423,25 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  app.post('/internal/heartbeat', (req, res) => {
+    const hb = req.body;
+    if (!hb || !hb.watcherId) {
+      return res.status(400).json({ error: 'watcherId required' });
+    }
+    watcherState.watchers.set(hb.watcherId, {
+      ...hb,
+      receivedAt: new Date().toISOString()
+    });
+    // Prune stale watchers (not heard from in >60s)
+    const cutoff = Date.now() - 60000;
+    for (const [id, w] of watcherState.watchers) {
+      if (new Date(w.receivedAt).getTime() < cutoff) {
+        watcherState.watchers.delete(id);
+      }
+    }
+    res.json({ ok: true });
   });
 
   app.get('/status', (req, res) => {
