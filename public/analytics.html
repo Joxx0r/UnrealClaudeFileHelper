@@ -76,7 +76,12 @@
 
     <!-- Overview stats -->
     <div class="card">
-      <h2>Query Overview</h2>
+      <h2 style="display:flex;align-items:center;gap:12px">Query Overview
+        <button onclick="resetStats()" id="reset-stats-btn"
+          style="padding:3px 10px;background:#3e3e3e;color:#d4d4d4;border:1px solid #555;border-radius:3px;cursor:pointer;font-size:11px">
+          Reset Stats
+        </button>
+      </h2>
       <div id="overview" class="loading">Loading...</div>
     </div>
 
@@ -102,6 +107,23 @@
   <script>
     async function loadAll() {
       await Promise.all([loadHealth(), loadAnalytics(), loadWatcher()]);
+    }
+
+    async function resetStats() {
+      const btn = document.getElementById('reset-stats-btn');
+      if (!confirm('Clear all query analytics data?')) return;
+      btn.disabled = true;
+      btn.textContent = 'Clearing...';
+      try {
+        const resp = await fetch('/query-analytics?all=true', { method: 'DELETE' });
+        const data = await resp.json();
+        btn.textContent = `Cleared ${data.deleted}`;
+        setTimeout(() => { btn.textContent = 'Reset Stats'; btn.disabled = false; }, 2000);
+        loadAnalytics();
+      } catch (err) {
+        btn.textContent = 'Error';
+        setTimeout(() => { btn.textContent = 'Reset Stats'; btn.disabled = false; }, 2000);
+      }
     }
 
     async function startWatcher() {

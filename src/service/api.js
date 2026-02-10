@@ -853,9 +853,14 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
 
   app.delete('/query-analytics', (req, res) => {
     try {
-      const daysOld = req.query.daysOld ? parseInt(req.query.daysOld) : 7;
-      const deleted = database.cleanupOldAnalytics(daysOld);
-      res.json({ deleted, message: `Deleted ${deleted} analytics records older than ${daysOld} days` });
+      if (req.query.all === 'true') {
+        const result = database.db.prepare('DELETE FROM query_analytics').run();
+        res.json({ deleted: result.changes, message: `Cleared all ${result.changes} analytics records` });
+      } else {
+        const daysOld = req.query.daysOld ? parseInt(req.query.daysOld) : 7;
+        const deleted = database.cleanupOldAnalytics(daysOld);
+        res.json({ deleted, message: `Deleted ${deleted} analytics records older than ${daysOld} days` });
+      }
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
