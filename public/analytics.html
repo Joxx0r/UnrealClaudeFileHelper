@@ -240,8 +240,8 @@
         const data = await resp.json();
 
         const zoekt = data.zoekt || {};
-        const zoektStatus = zoekt.running ? 'running' : 'stopped';
-        const zoektClass = zoekt.running ? 'health-ok' : 'health-err';
+        const zoektStatus = (zoekt.running || zoekt.available) ? 'running' : 'stopped';
+        const zoektClass = (zoekt.running || zoekt.available) ? 'health-ok' : 'health-err';
 
         el.innerHTML = `
           <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value health-ok">${data.status}</span></div>
