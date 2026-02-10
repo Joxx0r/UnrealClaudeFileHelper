@@ -139,11 +139,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
   async function poolQuery(method, args, timeoutMs = 30000) {
     if (queryPool) {
       const { result, durationMs } = await queryPool.execute(method, args, timeoutMs);
-      if (durationMs >= SLOW_QUERY_MS) {
-        const resultCount = Array.isArray(result) ? result.length :
-          result?.results ? result.results.length : null;
-        database._logSlowQuery(method, args, durationMs, resultCount);
-      }
+      const resultCount = Array.isArray(result) ? result.length :
+        result?.results ? result.results.length : null;
+      database._logSlowQuery(method, args, durationMs, resultCount);
       return result;
     }
     return database[method](...args);
@@ -1014,6 +1012,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       const durationMs = Math.round(performance.now() - grepStartMs);
       const logFn = durationMs > 1000 ? console.warn : console.log;
       logFn(`[Grep] "${pattern.slice(0, 60)}" -> ${results.length} results (zoekt, ${durationMs}ms)`);
+
+      // Log to query analytics
+      database._logSlowQuery('grep', [pattern, project || '', language || ''], durationMs, results.length);
 
       if (grouped !== 'false') {
         const groupedResponse = {
