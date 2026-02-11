@@ -116,6 +116,12 @@
       <div id="slowest" class="loading">Loading...</div>
     </div>
 
+    <!-- Zero-Result Queries -->
+    <div class="card card-full">
+      <h2>Zero-Result Queries</h2>
+      <div id="zero-results" class="loading">Loading...</div>
+    </div>
+
     <!-- MCP Tool Usage -->
     <div class="card">
       <h2 style="display:flex;align-items:center;gap:12px">MCP Tool Usage
@@ -336,6 +342,7 @@
       const methodEl = document.getElementById('by-method');
       const latencyEl = document.getElementById('latency');
       const slowestEl = document.getElementById('slowest');
+      const zeroEl = document.getElementById('zero-results');
 
       try {
         const since = getSinceParam();
@@ -411,12 +418,35 @@
             </table>
           `;
         }
+
+        // Zero-result queries
+        const zeroResults = data.zeroResults || [];
+        if (zeroResults.length === 0) {
+          zeroEl.innerHTML = '<span class="loading">No zero-result queries recorded</span>';
+        } else {
+          const totalZero = zeroResults.reduce((s, q) => s + q.count, 0);
+          zeroEl.innerHTML = `
+            <div style="margin-bottom:8px;font-size:12px;color:#808080">${totalZero.toLocaleString()} total zero-result queries across ${zeroResults.length} unique patterns</div>
+            <table>
+              <tr><th>Method</th><th>Args</th><th>Count</th><th>Last Seen</th></tr>
+              ${zeroResults.map(q => `
+                <tr>
+                  <td>${esc(q.method)}</td>
+                  <td class="mono">${esc(truncate(q.args, 100))}</td>
+                  <td class="mono" style="color:#ce9178">${q.count}</td>
+                  <td style="color:#808080">${formatTime(q.last_seen)}</td>
+                </tr>
+              `).join('')}
+            </table>
+          `;
+        }
       } catch (err) {
         const msg = `<span class="error">Failed to load: ${esc(err.message)}</span>`;
         overviewEl.innerHTML = msg;
         methodEl.innerHTML = msg;
         latencyEl.innerHTML = msg;
         slowestEl.innerHTML = msg;
+        zeroEl.innerHTML = msg;
       }
     }
 

@@ -1431,6 +1431,20 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       // Log to query analytics
       database._logSlowQuery('grep', [pattern, project || '', language || ''], durationMs, results.length);
 
+      // Build hints for zero-result greps to help agents understand why
+      const grepHints = [];
+      if (results.length === 0) {
+        if (pattern.includes('\\n') || pattern.includes('\\r')) {
+          grepHints.push('Pattern contains \\n (newline). Grep is line-based and cannot match across line boundaries. Split into separate single-line searches instead.');
+        }
+        if (pattern.includes('\\|')) {
+          grepHints.push('Pattern contains \\| (escaped pipe = literal |). For alternation (OR), use unescaped | e.g. "patternA|patternB".');
+        }
+        if (project) {
+          grepHints.push(`No results in project '${project}'. Try removing the project filter to search all projects.`);
+        }
+      }
+
       if (grouped !== 'false') {
         const groupedResponse = {
           results: groupResultsByFile(results),
@@ -1439,6 +1453,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
           grouped: true
         };
         if (assetResult.results.length > 0) groupedResponse.assets = assetResult.results;
+        if (grepHints.length > 0) groupedResponse.hints = grepHints;
         grepCache.set(cacheKey, groupedResponse);
         return res.json(groupedResponse);
       }
@@ -1451,6 +1466,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (assetResult.results.length > 0) {
         response.assets = assetResult.results;
       }
+      if (grepHints.length > 0) response.hints = grepHints;
       grepCache.set(cacheKey, response);
       return res.json(response);
     } catch (err) {

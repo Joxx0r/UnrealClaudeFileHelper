@@ -2129,7 +2129,17 @@ export class IndexDatabase {
 
     const total = this.db.prepare(`SELECT COUNT(*) as count FROM query_analytics${whereClause}`).get(...params).count;
 
-    return { total, byMethod, slowest };
+    // Zero-result queries grouped by method+args, ordered by frequency
+    const zeroResultWhere = since ? ' WHERE result_count = 0 AND timestamp >= ?' : ' WHERE result_count = 0';
+    const zeroResults = this.db.prepare(`
+      SELECT method, args, COUNT(*) as count, MAX(timestamp) as last_seen
+      FROM query_analytics${zeroResultWhere}
+      GROUP BY method, args
+      ORDER BY count DESC
+      LIMIT 20
+    `).all(...params);
+
+    return { total, byMethod, slowest, zeroResults };
   }
 
   cleanupOldAnalytics(daysOld = 7) {
