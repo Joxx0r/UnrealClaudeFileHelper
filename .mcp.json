@@ -2,7 +2,7 @@
   "mcpServers": {
     "unreal-index": {
       "command": "node",
-      "args": ["src/bridge/mcp-bridge.js"]
+      "args": ["${UNREAL_INDEX_DIR}/src/bridge/mcp-bridge.js"]
     }
   }
 }

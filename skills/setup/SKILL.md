@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Initialize and configure the embark-claude-index plugin. Clones repo into WSL, installs dependencies, runs the setup wizard, installs Zoekt, and starts the indexing service. Run this after first installing the plugin.
+description: Initialize and configure the embark-claude-index plugin. Clones repo, installs dependencies, sets environment variables, runs the setup wizard, installs Zoekt, and starts the indexing service. Run this after first installing the plugin.
 ---
 
 # embark-claude-index Setup
@@ -51,7 +51,42 @@ wsl -- bash -c 'sudo apt install -y build-essential python3'
 ```
 Then retry npm install.
 
-### Step 3: Run the interactive setup wizard in WSL
+### Step 3: Clone or update Windows-side repo for the MCP bridge
+
+The MCP bridge runs on Windows (spawned by Claude Code via stdio). It needs a Windows-accessible copy with `node_modules` installed.
+
+```bash
+if [ -d "$USERPROFILE/.claude/repos/embark-claude-index/.git" ]; then
+  cd "$USERPROFILE/.claude/repos/embark-claude-index" && git pull --ff-only && echo "Windows repo updated"
+else
+  git clone https://github.com/EmbarkStudios/UnrealClaudeFileHelper.git "$USERPROFILE/.claude/repos/embark-claude-index" && echo "Windows repo cloned"
+fi
+```
+
+Install dependencies on Windows (use `--ignore-scripts` to skip native compilation of better-sqlite3, which is only needed in WSL):
+
+```bash
+cd "$USERPROFILE/.claude/repos/embark-claude-index" && npm install --ignore-scripts --omit=dev
+```
+
+### Step 4: Set UNREAL_INDEX_DIR environment variable
+
+Set `UNREAL_INDEX_DIR` as a **persistent user-level environment variable** so the MCP bridge can be found across sessions. This is required for the plugin's `.mcp.json` to resolve the bridge path.
+
+```bash
+powershell.exe -Command "[Environment]::SetEnvironmentVariable('UNREAL_INDEX_DIR', (Join-Path \$env:USERPROFILE '.claude\repos\embark-claude-index'), 'User')"
+```
+
+Verify it was set:
+```bash
+powershell.exe -Command "[Environment]::GetEnvironmentVariable('UNREAL_INDEX_DIR', 'User')"
+```
+
+This should print something like `C:\Users\<username>\.claude\repos\embark-claude-index`.
+
+**IMPORTANT**: Tell the user they must **restart their terminal** (not just Claude Code) for the new environment variable to take effect. The variable persists across all future sessions.
+
+### Step 5: Run the interactive setup wizard in WSL
 
 ```bash
 wsl -- bash -c 'export PATH="$HOME/local/node22/bin:$PATH"; cd "$HOME/.claude/repos/embark-claude-index" && node src/setup.js'
@@ -65,7 +100,7 @@ The wizard will interactively ask the user for:
 
 **Note:** The wizard accepts Windows paths (e.g. `C:\Projects\MyGame`) and converts them automatically.
 
-### Step 4: Install Zoekt in WSL (full-text code search)
+### Step 6: Install Zoekt in WSL (full-text code search)
 
 Zoekt provides fast regex search across the entire codebase. It requires Go.
 
@@ -75,7 +110,7 @@ wsl -- bash -c 'export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"; if command -
 
 If Go is missing, tell the user: Zoekt is optional but recommended. Without it, `unreal_grep` will be unavailable. They can install Go later and re-run this step.
 
-### Step 5: Start the indexing service in WSL
+### Step 7: Start the indexing service in WSL
 
 First check if it's already running:
 ```bash
@@ -103,35 +138,19 @@ If the health check fails, check the log:
 wsl -- bash -c 'tail -20 /tmp/unreal-index.log'
 ```
 
-### Step 6: Start the file watcher
+### Step 8: Start the file watcher
 
-The watcher runs on the Windows side to watch project files. Find the repo path on Windows and start it:
-
-```bash
-"$HOME/.claude/repos/embark-claude-index/src/watcher/watcher-client.js"
-```
-
-Actually, the WSL repo is NOT directly accessible from Windows Git Bash as a Windows path. The watcher needs to run from a Windows-accessible copy. Check if a Windows copy exists:
+The watcher runs on the Windows side to watch project files:
 
 ```bash
-ls "$USERPROFILE/.claude/repos/embark-claude-index/package.json" 2>/dev/null && echo "Windows repo exists" || echo "No Windows repo"
-```
-
-If no Windows copy, clone one:
-```bash
-git clone https://github.com/EmbarkStudios/UnrealClaudeFileHelper.git "$USERPROFILE/.claude/repos/embark-claude-index"
-```
-
-Then install dependencies and start the watcher:
-```bash
-cd "$USERPROFILE/.claude/repos/embark-claude-index" && npm install --production && node src/watcher/watcher-client.js
+cd "$USERPROFILE/.claude/repos/embark-claude-index" && node src/watcher/watcher-client.js
 ```
 
 Note: The watcher runs in the foreground and will block the terminal. Tell the user they can:
 - Let it run in this terminal (it shows progress as files are indexed)
 - Or open a separate terminal to run it
 
-### Step 7: Verify
+### Step 9: Verify
 
 After the watcher outputs "initial scan complete" (may take a few minutes on first run), verify the index has data:
 
@@ -142,7 +161,7 @@ wsl -- bash -c 'curl -s http://127.0.0.1:3847/internal/status'
 This should show non-zero counts for indexed files.
 
 Tell the user:
-- **Restart Claude Code** to pick up the MCP tools. After restart, all `unreal_*` tools will be available.
+- **Restart their terminal AND Claude Code** to pick up the `UNREAL_INDEX_DIR` environment variable and MCP tools. After restart, all `unreal_*` tools will be available.
 - **Open the dashboard** at [http://localhost:3847](http://localhost:3847) to monitor service health, watcher status, Zoekt, query analytics, and MCP tool usage. The dashboard shows the status of all components and has controls to start/restart services.
 
 ## Troubleshooting
@@ -156,3 +175,5 @@ Common errors and fixes (all commands use bash syntax for Git Bash):
 - **Screen not installed**: `wsl -- bash -c 'sudo apt install -y screen'`
 - **better-sqlite3 compile error**: `wsl -- bash -c 'sudo apt install -y build-essential python3'`
 - **npm install fails with EACCES**: Don't run npm as root. Fix permissions: `wsl -- bash -c 'sudo chown -R $(whoami) "$HOME/.claude"'`
+- **MCP bridge not found / "Failed to reconnect"**: Ensure `UNREAL_INDEX_DIR` is set: `powershell.exe -Command "[Environment]::GetEnvironmentVariable('UNREAL_INDEX_DIR', 'User')"`. If empty, re-run Step 4. If set but wrong path, update it and restart terminal.
+- **Plugin update broke MCP bridge**: Run `cd "$USERPROFILE/.claude/repos/embark-claude-index" && git pull --ff-only && npm install --ignore-scripts --omit=dev` to update the Windows repo.
