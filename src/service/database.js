@@ -1778,7 +1778,7 @@ export class IndexDatabase {
   }
 
   findAssetByName(name, options = {}) {
-    const { fuzzy = false, project = null, folder = null, maxResults = 20 } = options;
+    const { fuzzy = true, project = null, folder = null, maxResults = 20 } = options;
 
     const assetCols = 'name, content_path, project, asset_class, parent_class';
 
@@ -2069,11 +2069,18 @@ export class IndexDatabase {
 
   _logSlowQuery(method, args, durationMs, resultCount = null) {
     try {
-      const argsJson = JSON.stringify(args.map(a =>
-        typeof a === 'string' ? a :
-        Array.isArray(a) ? `[${a.length} items]` :
-        typeof a === 'object' ? '{...}' : a
-      ));
+      const argsJson = JSON.stringify(args.map(a => {
+        if (typeof a === 'string') return a;
+        if (Array.isArray(a)) return `[${a.length} items]`;
+        if (typeof a === 'object' && a !== null) {
+          // Preserve key query flags for analytics visibility
+          const keys = ['fuzzy', 'project', 'language', 'kind', 'containingType'];
+          const kept = {};
+          for (const k of keys) { if (a[k] !== undefined && a[k] !== null) kept[k] = a[k]; }
+          return Object.keys(kept).length > 0 ? JSON.stringify(kept) : '{...}';
+        }
+        return a;
+      }));
       this.db.prepare(`
         INSERT INTO query_analytics (timestamp, method, args, duration_ms, result_count)
         VALUES (?, ?, ?, ?, ?)

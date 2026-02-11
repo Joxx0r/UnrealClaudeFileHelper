@@ -1080,7 +1080,7 @@ export class MemoryIndex {
   }
 
   findAssetByName(name, options = {}) {
-    const { fuzzy = false, project = null, folder = null, maxResults = 20 } = options;
+    const { fuzzy = true, project = null, folder = null, maxResults = 20 } = options;
 
     const matchAsset = (aid) => {
       const a = this.assetsById.get(aid);

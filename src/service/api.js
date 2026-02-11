@@ -1065,7 +1065,7 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       if (validateProject(database, project, res, memoryIndex)) return;
 
       const opts = {
-        fuzzy: fuzzy === 'true',
+        fuzzy: fuzzy !== 'false',
         project: project || null,
         folder: folder || null,
         maxResults: parseInt(maxResults, 10) || 20
