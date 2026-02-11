@@ -1279,11 +1279,17 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
               attachSignatures(result, database, r => resolveFileId(r.path));
             }
             if (BATCH_PATH_METHODS.has(method)) {
-              result.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
+              result.forEach(r => {
+                if (r.path) r.path = cleanPath(r.path, r.project);
+                if (r.implementationPath) r.implementationPath = cleanPath(r.implementationPath, r.project);
+              });
             }
           } else if (result && result.results && BATCH_PATH_METHODS.has(method)) {
             // findChildrenOf returns { results: [...] }
-            result.results.forEach(r => { if (r.path) r.path = cleanPath(r.path, r.project); });
+            result.results.forEach(r => {
+              if (r.path) r.path = cleanPath(r.path, r.project);
+              if (r.implementationPath) r.implementationPath = cleanPath(r.implementationPath, r.project);
+            });
           }
 
           results.push({ result });
