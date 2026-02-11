@@ -1,7 +1,7 @@
 {
-  "name": "unreal-index",
+  "name": "embark-claude-index",
   "version": "2.0.0",
-  "description": "AngelScript index service with HTTP API and MCP bridge for Claude Code",
+  "description": "Fast code index for Unreal Engine projects — search types, members, files, assets, and grep across AngelScript, C++, and Blueprints via MCP tools",
   "main": "src/service/index.js",
   "type": "module",
   "scripts": {

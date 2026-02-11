@@ -1,8 +1,12 @@
 {
-  "name": "unreal-index",
-  "description": "AngelScript file index for fast class/struct/file lookups in Unreal projects. Provides tools to find types, browse modules, and discover class hierarchies.",
+  "name": "embark-claude-index",
+  "version": "2.0.0",
+  "description": "Fast code index for Unreal Engine projects — search types, members, files, assets, and grep across AngelScript, C++, and Blueprints via MCP tools.",
   "author": {
-    "name": "EmbarkStudios"
+    "name": "EmbarkStudios",
+    "url": "https://github.com/EmbarkStudios"
   },
+  "repository": "https://github.com/EmbarkStudios/UnrealClaudeFileHelper",
+  "keywords": ["unreal-engine", "gamedev", "angelscript", "cpp", "ue5", "code-search", "mcp"],
   "eagerToolLoading": true
 }

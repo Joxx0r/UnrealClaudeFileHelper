@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "embark-claude-index",
+  "description": "Fast code index for Unreal Engine projects — search 100K+ types, 600K+ members, 400K+ assets instantly via MCP tools",
+  "owner": {
+    "name": "EmbarkStudios",
+    "url": "https://github.com/EmbarkStudios"
+  },
+  "plugins": [
+    {
+      "name": "embark-claude-index",
+      "version": "2.0.0",
+      "description": "MCP server providing fast code navigation for Unreal Engine projects. Indexes AngelScript, C++, Blueprints, and assets. 11 search tools with sub-20ms queries.",
+      "author": {
+        "name": "EmbarkStudios",
+        "url": "https://github.com/EmbarkStudios"
+      },
+      "source": "./",
+      "category": "development",
+      "homepage": "https://github.com/EmbarkStudios/UnrealClaudeFileHelper"
+    }
+  ]
+}
