@@ -483,13 +483,22 @@ export class ZoektManager {
   }
 
   getStatus() {
+    let shardCount = null;
+    try {
+      if (existsSync(this.indexDir)) {
+        shardCount = readdirSync(this.indexDir).filter(f => f.endsWith('.zoekt')).length;
+      }
+    } catch {}
     return {
+      running: this.webProcess !== null,
       available: this.isAvailable(),
       port: this.webPort,
+      shardCount,
       indexing: this._indexingActive || this.indexProcess !== null,
       lastIndexTime: this.lastIndexCompleteTime,
       lastIndexDurationS: this.lastIndexDurationS,
-      restartAttempts: this.restartAttempts
+      restartAttempts: this.restartAttempts,
+      maxRestartAttempts: this.maxRestartAttempts
     };
   }
 

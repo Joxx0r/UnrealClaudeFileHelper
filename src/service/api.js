@@ -672,6 +672,28 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
   });
 
+  app.post('/internal/restart-zoekt', async (req, res) => {
+    if (!zoektManager) {
+      return res.status(404).json({ error: 'Zoekt is not configured', hint: 'Enable zoekt in config.json and ensure Go/zoekt binaries are installed' });
+    }
+    try {
+      console.log('[API] Restarting Zoekt...');
+      await zoektManager.stop();
+      // Reset restart attempts so it can try again
+      zoektManager.restartAttempts = 0;
+      zoektManager.maxRestartAttempts = 5;
+      const started = await zoektManager.start();
+      if (started) {
+        res.json({ ok: true, message: 'Zoekt restarted successfully' });
+      } else {
+        res.status(500).json({ error: 'Zoekt failed to start after restart', hint: 'Check /tmp/unreal-index.log for details' });
+      }
+    } catch (err) {
+      console.error(`[API] Zoekt restart failed: ${err.message}`);
+      res.status(500).json({ error: `Zoekt restart failed: ${err.message}` });
+    }
+  });
+
   app.get('/status', (req, res) => {
     try {
       const allStatus = database.getAllIndexStatus();

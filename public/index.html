@@ -107,6 +107,7 @@
         <div class="overview-name">Zoekt</div>
         <div class="overview-detail" id="ov-zoekt-detail">Checking...</div>
       </div>
+      <div class="overview-action" id="ov-zoekt-action"></div>
     </div>
   </div>
 
@@ -619,16 +620,25 @@
       const watcherAction = document.getElementById('ov-watcher-action');
       const zoektDot = document.getElementById('ov-zoekt-dot');
       const zoektDetail = document.getElementById('ov-zoekt-detail');
+      const zoektAction = document.getElementById('ov-zoekt-action');
 
       // Service health
       try {
         const resp = await fetch('/health');
         const data = await resp.json();
-        serviceDot.className = 'overview-dot dot-green';
-        serviceDetail.textContent = `Up ${formatUptime(data.uptimeSeconds)} · ${data.memoryMB.rss} MB RSS`;
+        const heap = data.memoryMB.heapUsed;
+        const heapMax = data.memoryMB.heapTotal;
+        const heapPct = Math.round(heap / heapMax * 100);
+        if (heapPct > 90) {
+          serviceDot.className = 'overview-dot dot-yellow';
+          serviceDetail.textContent = `Up ${formatUptime(data.uptimeSeconds)} · Heap ${heapPct}% (${heap}/${heapMax} MB) — high memory`;
+        } else {
+          serviceDot.className = 'overview-dot dot-green';
+          serviceDetail.textContent = `Up ${formatUptime(data.uptimeSeconds)} · ${data.memoryMB.rss} MB RSS · Heap ${heapPct}%`;
+        }
       } catch {
         serviceDot.className = 'overview-dot dot-red';
-        serviceDetail.textContent = 'Not responding';
+        serviceDetail.innerHTML = 'Not responding — restart with: <code>wsl -- bash -c \'cd ~/.claude/repos/embark-claude-index && ./start-service.sh --bg\'</code>';
       }
 
       // Watcher status
@@ -638,19 +648,25 @@
         const active = data.hasActiveWatcher;
         const w = data.watchers[0];
         if (active && w) {
-          watcherDot.className = 'overview-dot dot-green';
           const files = (w.counters?.filesIngested || 0).toLocaleString();
           const assets = (w.counters?.assetsIngested || 0).toLocaleString();
-          watcherDetail.textContent = `Active · ${files} files, ${assets} assets ingested`;
+          const errors = w.counters?.errorsCount || 0;
+          if (errors > 0) {
+            watcherDot.className = 'overview-dot dot-yellow';
+            watcherDetail.textContent = `Active · ${files} files, ${assets} assets · ${errors} error(s)`;
+          } else {
+            watcherDot.className = 'overview-dot dot-green';
+            watcherDetail.textContent = `Active · ${files} files, ${assets} assets ingested`;
+          }
           watcherAction.innerHTML = '';
         } else {
           watcherDot.className = 'overview-dot dot-red';
-          watcherDetail.textContent = 'No watcher connected';
+          watcherDetail.textContent = 'No watcher connected — file changes won\'t be indexed';
           watcherAction.innerHTML = '<button class="action-btn" onclick="overviewStartWatcher(this)">Start</button>';
         }
       } catch {
         watcherDot.className = 'overview-dot dot-red';
-        watcherDetail.textContent = 'Unknown';
+        watcherDetail.textContent = 'Status unknown';
         watcherAction.innerHTML = '<button class="action-btn" onclick="overviewStartWatcher(this)">Start</button>';
       }
 
@@ -662,14 +678,25 @@
         if (zoekt.running || zoekt.available) {
           zoektDot.className = 'overview-dot dot-green';
           const shards = zoekt.shardCount != null ? `${zoekt.shardCount} shards` : 'running';
-          zoektDetail.textContent = shards;
+          const restarts = zoekt.restartAttempts > 0 ? ` · ${zoekt.restartAttempts} restart(s)` : '';
+          zoektDetail.textContent = shards + restarts;
+          zoektAction.innerHTML = '<button class="action-btn action-btn-warn" onclick="overviewRestartZoekt(this)">Restart</button>';
+        } else if (zoekt.configured === false || (!zoekt.running && !zoekt.available && !zoekt.shardCount)) {
+          zoektDot.className = 'overview-dot dot-gray';
+          zoektDetail.textContent = 'Not configured — install Go + Zoekt for grep search';
+          zoektAction.innerHTML = '';
         } else {
-          zoektDot.className = 'overview-dot dot-yellow';
-          zoektDetail.textContent = 'Not running — grep search unavailable';
+          zoektDot.className = 'overview-dot dot-red';
+          const detail = zoekt.restartAttempts >= 5
+            ? 'Crashed (max restarts reached) — grep unavailable'
+            : 'Not running — grep search unavailable';
+          zoektDetail.textContent = detail;
+          zoektAction.innerHTML = '<button class="action-btn" onclick="overviewRestartZoekt(this)">Restart</button>';
         }
       } catch {
         zoektDot.className = 'overview-dot dot-gray';
         zoektDetail.textContent = 'Unknown';
+        zoektAction.innerHTML = '';
       }
     }
 
@@ -707,6 +734,28 @@
       } catch (err) {
         btn.textContent = 'Error';
         setTimeout(() => { btn.textContent = 'Start'; btn.disabled = false; }, 3000);
+      }
+    }
+
+    async function overviewRestartZoekt(btn) {
+      btn.disabled = true;
+      btn.textContent = 'Restarting...';
+      try {
+        const resp = await fetch('/internal/restart-zoekt', { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok) {
+          btn.textContent = 'Restarted';
+          setTimeout(() => loadOverview(), 1000);
+        } else {
+          btn.textContent = data.error || 'Failed';
+          if (data.hint) {
+            document.getElementById('ov-zoekt-detail').textContent = data.hint;
+          }
+          setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 4000);
+        }
+      } catch (err) {
+        btn.textContent = 'Error';
+        setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 3000);
       }
     }
 
