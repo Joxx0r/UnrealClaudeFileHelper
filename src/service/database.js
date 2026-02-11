@@ -416,11 +416,14 @@ export class IndexDatabase {
   }
 
   projectExists(project) {
-    return !!this.db.prepare('SELECT 1 FROM files WHERE project = ? LIMIT 1').get(project);
+    return !!this.db.prepare('SELECT 1 FROM files WHERE project = ? LIMIT 1').get(project)
+      || !!this.db.prepare('SELECT 1 FROM assets WHERE project = ? LIMIT 1').get(project);
   }
 
   getDistinctProjects() {
-    return this.db.prepare('SELECT DISTINCT project FROM files ORDER BY project').pluck().all();
+    return this.db.prepare(
+      'SELECT DISTINCT project FROM files UNION SELECT DISTINCT project FROM assets ORDER BY project'
+    ).pluck().all();
   }
 
   getFilteredFiles(project, language) {

@@ -486,11 +486,12 @@ export class MemoryIndex {
   // --- Phase 3: Query methods ---
 
   projectExists(project) {
-    return this.filesByProject.has(project);
+    return this.filesByProject.has(project) || this.assetsByProject.has(project);
   }
 
   getDistinctProjects() {
-    return [...this.filesByProject.keys()].sort();
+    const projects = new Set([...this.filesByProject.keys(), ...this.assetsByProject.keys()]);
+    return [...projects].sort();
   }
 
   findTypeByName(name, options = {}) {
