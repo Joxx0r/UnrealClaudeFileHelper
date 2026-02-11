@@ -41,6 +41,22 @@
     .error { color: #f44747; }
     .refresh-btn { background: #333; color: #808080; border: 1px solid #3e3e3e; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px; }
     .refresh-btn:hover { background: #3e3e3e; color: #d4d4d4; }
+    .overview-bar { display: flex; gap: 16px; margin-bottom: 20px; }
+    .overview-item { flex: 1; background: #252526; border: 1px solid #3e3e3e; border-radius: 6px; padding: 14px 16px; display: flex; align-items: center; gap: 12px; }
+    .overview-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+    .dot-green { background: #4ec9b0; box-shadow: 0 0 6px #4ec9b044; }
+    .dot-red { background: #f44747; box-shadow: 0 0 6px #f4474744; }
+    .dot-yellow { background: #ce9178; box-shadow: 0 0 6px #ce917844; }
+    .dot-gray { background: #555; }
+    .overview-info { flex: 1; min-width: 0; }
+    .overview-name { font-size: 13px; font-weight: 600; color: #d4d4d4; }
+    .overview-detail { font-size: 11px; color: #808080; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .overview-action { flex-shrink: 0; }
+    .action-btn { padding: 4px 12px; background: #0e639c; color: #fff; border: none; border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .action-btn:hover { background: #1177bb; }
+    .action-btn:disabled { background: #333; color: #666; cursor: default; }
+    .action-btn-warn { background: #6d4c1d; }
+    .action-btn-warn:hover { background: #8a6020; }
     .range-filter { display: flex; gap: 2px; }
     .range-btn { background: #2d2d2d; color: #808080; border: 1px solid #3e3e3e; padding: 4px 10px; cursor: pointer; font-size: 12px; }
     .range-btn:first-child { border-radius: 3px 0 0 3px; }
@@ -66,6 +82,32 @@
     </div>
     <button class="refresh-btn" onclick="loadAll()">Refresh</button>
     <span id="version-badge" style="margin-left:auto;font-size:11px;color:#555;font-family:'Cascadia Code','Consolas',monospace"></span>
+  </div>
+
+  <!-- System Overview -->
+  <div class="overview-bar" id="system-overview">
+    <div class="overview-item" id="ov-service">
+      <div class="overview-dot dot-gray" id="ov-service-dot"></div>
+      <div class="overview-info">
+        <div class="overview-name">Service</div>
+        <div class="overview-detail" id="ov-service-detail">Checking...</div>
+      </div>
+    </div>
+    <div class="overview-item" id="ov-watcher">
+      <div class="overview-dot dot-gray" id="ov-watcher-dot"></div>
+      <div class="overview-info">
+        <div class="overview-name">Watcher</div>
+        <div class="overview-detail" id="ov-watcher-detail">Checking...</div>
+      </div>
+      <div class="overview-action" id="ov-watcher-action"></div>
+    </div>
+    <div class="overview-item" id="ov-zoekt">
+      <div class="overview-dot dot-gray" id="ov-zoekt-dot"></div>
+      <div class="overview-info">
+        <div class="overview-name">Zoekt</div>
+        <div class="overview-detail" id="ov-zoekt-detail">Checking...</div>
+      </div>
+    </div>
   </div>
 
   <div class="grid">
@@ -569,8 +611,111 @@
       return d.innerHTML;
     }
 
-    loadAll();
-    setInterval(loadAll, 15000); // Auto-refresh every 15s
+    async function loadOverview() {
+      const serviceDot = document.getElementById('ov-service-dot');
+      const serviceDetail = document.getElementById('ov-service-detail');
+      const watcherDot = document.getElementById('ov-watcher-dot');
+      const watcherDetail = document.getElementById('ov-watcher-detail');
+      const watcherAction = document.getElementById('ov-watcher-action');
+      const zoektDot = document.getElementById('ov-zoekt-dot');
+      const zoektDetail = document.getElementById('ov-zoekt-detail');
+
+      // Service health
+      try {
+        const resp = await fetch('/health');
+        const data = await resp.json();
+        serviceDot.className = 'overview-dot dot-green';
+        serviceDetail.textContent = `Up ${formatUptime(data.uptimeSeconds)} · ${data.memoryMB.rss} MB RSS`;
+      } catch {
+        serviceDot.className = 'overview-dot dot-red';
+        serviceDetail.textContent = 'Not responding';
+      }
+
+      // Watcher status
+      try {
+        const resp = await fetch('/watcher-status');
+        const data = await resp.json();
+        const active = data.hasActiveWatcher;
+        const w = data.watchers[0];
+        if (active && w) {
+          watcherDot.className = 'overview-dot dot-green';
+          const files = (w.counters?.filesIngested || 0).toLocaleString();
+          const assets = (w.counters?.assetsIngested || 0).toLocaleString();
+          watcherDetail.textContent = `Active · ${files} files, ${assets} assets ingested`;
+          watcherAction.innerHTML = '';
+        } else {
+          watcherDot.className = 'overview-dot dot-red';
+          watcherDetail.textContent = 'No watcher connected';
+          watcherAction.innerHTML = '<button class="action-btn" onclick="overviewStartWatcher(this)">Start</button>';
+        }
+      } catch {
+        watcherDot.className = 'overview-dot dot-red';
+        watcherDetail.textContent = 'Unknown';
+        watcherAction.innerHTML = '<button class="action-btn" onclick="overviewStartWatcher(this)">Start</button>';
+      }
+
+      // Zoekt status
+      try {
+        const resp = await fetch('/health');
+        const data = await resp.json();
+        const zoekt = data.zoekt || {};
+        if (zoekt.running || zoekt.available) {
+          zoektDot.className = 'overview-dot dot-green';
+          const shards = zoekt.shardCount != null ? `${zoekt.shardCount} shards` : 'running';
+          zoektDetail.textContent = shards;
+        } else {
+          zoektDot.className = 'overview-dot dot-yellow';
+          zoektDetail.textContent = 'Not running — grep search unavailable';
+        }
+      } catch {
+        zoektDot.className = 'overview-dot dot-gray';
+        zoektDetail.textContent = 'Unknown';
+      }
+    }
+
+    async function overviewStartWatcher(btn) {
+      btn.disabled = true;
+      btn.textContent = 'Starting...';
+      try {
+        const resp = await fetch('/internal/start-watcher', { method: 'POST' });
+        if (!resp.ok) {
+          const data = await resp.json();
+          btn.textContent = data.error || 'Failed';
+          setTimeout(() => { btn.textContent = 'Start'; btn.disabled = false; }, 3000);
+          return;
+        }
+        btn.textContent = 'Started';
+        // Poll until watcher appears
+        let attempts = 0;
+        const poll = setInterval(async () => {
+          attempts++;
+          try {
+            const sr = await fetch('/watcher-status');
+            const sd = await sr.json();
+            if (sd.hasActiveWatcher) {
+              clearInterval(poll);
+              loadOverview();
+              loadWatcher();
+            }
+          } catch {}
+          if (attempts >= 15) {
+            clearInterval(poll);
+            btn.textContent = 'Start';
+            btn.disabled = false;
+          }
+        }, 2000);
+      } catch (err) {
+        btn.textContent = 'Error';
+        setTimeout(() => { btn.textContent = 'Start'; btn.disabled = false; }, 3000);
+      }
+    }
+
+    async function loadAllWithOverview() {
+      await Promise.all([loadOverview(), loadHealth(), loadAnalytics(), loadWatcher(), loadMcpAnalytics()]);
+    }
+
+    loadAllWithOverview();
+    setInterval(loadAllWithOverview, 15000); // Auto-refresh every 15s
   </script>
 </body>
 </html>

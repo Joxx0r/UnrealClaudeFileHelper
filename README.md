@@ -72,6 +72,7 @@ This will guide you through:
 - **File Watcher** (`src/watcher/watcher-client.js`): Watches project directories for file changes, parses source files, and sends them to the service via HTTP.
 - **Indexing Service** (`src/service/index.js`): Stores data in SQLite, loads everything into memory for fast queries. Optionally integrates with Zoekt for full-text search.
 - **MCP Bridge** (`src/bridge/mcp-bridge.js`): Translates MCP tool calls from Claude Code into HTTP API calls against the service.
+- **Dashboard** (`http://localhost:3847`): Web UI showing system health overview, watcher status with start/restart controls, query analytics, and MCP tool usage.
 
 ## MCP Tools
 

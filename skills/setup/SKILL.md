@@ -130,7 +130,9 @@ wsl -- bash -c 'curl -s http://127.0.0.1:3847/internal/status'
 
 This should show non-zero counts for indexed files.
 
-Tell the user: **Restart Claude Code** to pick up the MCP tools. After restart, all `unreal_*` tools will be available.
+Tell the user:
+- **Restart Claude Code** to pick up the MCP tools. After restart, all `unreal_*` tools will be available.
+- **Open the dashboard** at [http://localhost:3847](http://localhost:3847) to monitor service health, watcher status, Zoekt, query analytics, and MCP tool usage. The dashboard shows the status of all components and has controls to start/restart the watcher.
 
 ## Troubleshooting
 
