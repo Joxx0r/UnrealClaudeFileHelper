@@ -3,267 +3,539 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Unreal Index Search</title>
+  <title>Unreal Index — Dashboard</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
-    .header { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1e1e1e; color: #d4d4d4; padding: 20px; max-width: 1200px; margin: 0 auto; }
+    .header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
     h1 { font-size: 1.4em; color: #569cd6; }
     .nav-link { font-size: 13px; color: #808080; text-decoration: none; }
     .nav-link:hover { color: #569cd6; }
-    .search-bar { display: flex; gap: 8px; margin-bottom: 12px; position: relative; }
-    #pattern { flex: 1; padding: 8px 12px; font-size: 14px; font-family: 'Cascadia Code', 'Consolas', monospace;
-      background: #2d2d2d; border: 1px solid #3e3e3e; color: #d4d4d4; border-radius: 4px; }
-    #pattern:focus { outline: none; border-color: #569cd6; }
-    button { padding: 8px 16px; background: #0e639c; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-    button:hover { background: #1177bb; }
-    .loading { display: none; font-size: 12px; color: #569cd6; margin-left: 8px; align-self: center; }
-    .loading.active { display: inline; }
-    .filters { display: flex; gap: 12px; margin-bottom: 16px; font-size: 13px; align-items: center; }
-    .filters label { display: flex; align-items: center; gap: 4px; }
-    .filters select, .filters input[type="text"] {
-      background: #2d2d2d; border: 1px solid #3e3e3e; color: #d4d4d4; padding: 4px 8px; border-radius: 3px; font-size: 13px; }
-    .meta { font-size: 13px; color: #808080; margin-bottom: 12px; }
-    .meta span { color: #569cd6; }
-    .result { border-left: 3px solid #3e3e3e; margin-bottom: 8px; padding: 4px 0 4px 12px; }
-    .result:hover { border-left-color: #569cd6; }
-    .result.selected { border-left-color: #569cd6; background: #252526; }
-    .result-file { font-size: 13px; color: #4ec9b0; cursor: pointer; text-decoration: none; }
-    .result-file:hover { text-decoration: underline; }
-    .result-line { font-size: 12px; color: #808080; margin-left: 4px; }
-    .result-match { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 13px; white-space: pre-wrap;
-      background: #252526; padding: 2px 6px; margin-top: 2px; border-radius: 2px; overflow-x: auto; }
-    .result-context { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px; color: #666;
-      white-space: pre-wrap; padding: 0 6px; }
-    .assets-section { margin-top: 20px; border-top: 1px solid #3e3e3e; padding-top: 12px; }
-    .assets-section h3 { font-size: 1em; color: #ce9178; margin-bottom: 8px; }
-    .asset { padding: 4px 0 4px 12px; border-left: 3px solid #3e3e3e; margin-bottom: 6px; }
-    .asset-path { color: #ce9178; font-size: 13px; }
-    .asset-match { font-size: 12px; color: #808080; margin-top: 2px; }
-    .empty { color: #808080; font-style: italic; margin-top: 20px; }
-    .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-left: 6px; }
-    .badge-lang { background: #264f78; color: #9cdcfe; }
-    .badge-proj { background: #4d3519; color: #ce9178; }
-    .shortcut-hint { font-size: 11px; color: #555; margin-top: 4px; }
-    kbd { background: #333; padding: 1px 5px; border-radius: 3px; border: 1px solid #555; font-size: 11px; font-family: inherit; }
+    h2 { font-size: 1.1em; color: #9cdcfe; margin-bottom: 12px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+    .card { background: #252526; border: 1px solid #3e3e3e; border-radius: 6px; padding: 16px; }
+    .card-full { grid-column: 1 / -1; }
+    .stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #2d2d2d; font-size: 13px; }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label { color: #808080; }
+    .stat-value { color: #4ec9b0; font-family: 'Cascadia Code', 'Consolas', monospace; }
+    .stat-big { font-size: 28px; color: #569cd6; font-weight: 600; margin-bottom: 4px; }
+    .stat-desc { font-size: 12px; color: #808080; }
+    .bar-chart { display: flex; flex-direction: column; gap: 6px; }
+    .bar-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .bar-label { width: 140px; text-align: right; color: #808080; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bar-track { flex: 1; height: 20px; background: #2d2d2d; border-radius: 3px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 3px; min-width: 2px; transition: width 0.3s; }
+    .bar-fill-blue { background: #264f78; }
+    .bar-fill-orange { background: #6d4c1d; }
+    .bar-fill-red { background: #6d1d1d; }
+    .bar-value { width: 80px; font-family: 'Cascadia Code', 'Consolas', monospace; color: #d4d4d4; font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: #808080; padding: 6px 8px; border-bottom: 1px solid #3e3e3e; }
+    td { padding: 6px 8px; border-bottom: 1px solid #2d2d2d; }
+    td.mono { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px; }
+    .health-ok { color: #4ec9b0; }
+    .health-warn { color: #ce9178; }
+    .health-err { color: #f44747; }
+    .loading { color: #808080; font-style: italic; }
+    .error { color: #f44747; }
+    .refresh-btn { background: #333; color: #808080; border: 1px solid #3e3e3e; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px; }
+    .refresh-btn:hover { background: #3e3e3e; color: #d4d4d4; }
+    .latency-compare { display: flex; gap: 12px; align-items: flex-end; margin-top: 8px; }
+    .latency-bar { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+    .latency-bar-inner { width: 60px; border-radius: 3px 3px 0 0; }
+    .latency-label { font-size: 11px; color: #808080; }
+    .latency-value { font-size: 13px; font-family: 'Cascadia Code', 'Consolas', monospace; }
   </style>
 </head>
 <body>
   <div class="header">
-    <h1>Unreal Index Search <span id="watcher-dot" title="Watcher: checking..." style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#808080;margin-left:4px;vertical-align:middle"></span></h1>
-    <a class="nav-link" href="/analytics.html">Analytics</a>
+    <h1>Unreal Index</h1>
+    <a class="nav-link" href="/search.html">Search</a>
+    <button class="refresh-btn" onclick="loadAll()">Refresh</button>
+    <span id="version-badge" style="margin-left:auto;font-size:11px;color:#555;font-family:'Cascadia Code','Consolas',monospace"></span>
   </div>
-  <div class="search-bar">
-    <input type="text" id="pattern" placeholder="Search pattern (regex supported)" autofocus />
-    <button onclick="doSearch()">Search</button>
-    <span id="loading" class="loading">Searching...</span>
+
+  <div class="grid">
+    <!-- Watcher Status -->
+    <div class="card">
+      <h2>Watcher Status</h2>
+      <div id="watcher" class="loading">Loading...</div>
+    </div>
+
+    <!-- Health & Status -->
+    <div class="card">
+      <h2>Service Health</h2>
+      <div id="health" class="loading">Loading...</div>
+    </div>
+
+    <!-- Project Freshness -->
+    <div class="card card-full">
+      <h2>Project Freshness</h2>
+      <div id="freshness" class="loading">Loading...</div>
+    </div>
+
+    <!-- Overview stats -->
+    <div class="card">
+      <h2 style="display:flex;align-items:center;gap:12px">Query Overview
+        <button onclick="resetStats()" id="reset-stats-btn"
+          style="padding:3px 10px;background:#3e3e3e;color:#d4d4d4;border:1px solid #555;border-radius:3px;cursor:pointer;font-size:11px">
+          Reset Stats
+        </button>
+      </h2>
+      <div id="overview" class="loading">Loading...</div>
+    </div>
+
+    <!-- Queries by method -->
+    <div class="card">
+      <h2>Queries by Endpoint</h2>
+      <div id="by-method" class="loading">Loading...</div>
+    </div>
+
+    <!-- Latency comparison -->
+    <div class="card">
+      <h2>Avg Latency by Endpoint</h2>
+      <div id="latency" class="loading">Loading...</div>
+    </div>
+
+    <!-- Slowest queries -->
+    <div class="card card-full">
+      <h2>Slowest Queries (Top 10)</h2>
+      <div id="slowest" class="loading">Loading...</div>
+    </div>
+
+    <!-- MCP Tool Usage -->
+    <div class="card">
+      <h2 style="display:flex;align-items:center;gap:12px">MCP Tool Usage
+        <button onclick="resetMcpStats()" id="reset-mcp-btn"
+          style="padding:3px 10px;background:#3e3e3e;color:#d4d4d4;border:1px solid #555;border-radius:3px;cursor:pointer;font-size:11px">
+          Reset
+        </button>
+      </h2>
+      <div id="mcp-overview" class="loading">Loading...</div>
+    </div>
+
+    <!-- MCP Tool Call Counts -->
+    <div class="card">
+      <h2>MCP Calls by Tool</h2>
+      <div id="mcp-by-tool" class="loading">Loading...</div>
+    </div>
+
+    <!-- MCP Recent Calls -->
+    <div class="card card-full">
+      <h2>Recent MCP Tool Calls (Last 50)</h2>
+      <div id="mcp-recent" class="loading">Loading...</div>
+    </div>
+
+    <!-- MCP Sessions -->
+    <div class="card card-full">
+      <h2>MCP Sessions</h2>
+      <div id="mcp-sessions" class="loading">Loading...</div>
+    </div>
   </div>
-  <div class="filters">
-    <label>Project: <input type="text" id="project" placeholder="all" style="width:120px" /></label>
-    <label>Language:
-      <select id="language">
-        <option value="">All</option>
-        <option value="cpp">C++</option>
-        <option value="angelscript">AngelScript</option>
-        <option value="config">Config</option>
-      </select>
-    </label>
-    <label><input type="checkbox" id="caseSensitive" checked /> Case sensitive</label>
-    <label>Max:
-      <select id="maxResults">
-        <option value="25">25</option>
-        <option value="50" selected>50</option>
-        <option value="100">100</option>
-        <option value="200">200</option>
-      </select>
-    </label>
-  </div>
-  <div class="shortcut-hint">
-    <kbd>/</kbd> focus search &nbsp; <kbd>Up</kbd>/<kbd>Down</kbd> navigate results &nbsp; <kbd>Enter</kbd> open in VS Code
-  </div>
-  <div id="meta" class="meta"></div>
-  <div id="results"></div>
 
   <script>
-    const $ = id => document.getElementById(id);
-
-    // --- Debounced live search ---
-    let debounceTimer = null;
-    let currentController = null;
-    let selectedIndex = -1;
-
-    $('pattern').addEventListener('input', () => {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => doSearch(), 300);
-    });
-
-    $('pattern').addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        clearTimeout(debounceTimer);
-        doSearch();
-      }
-    });
-
-    // Debounce filter changes too
-    for (const id of ['project', 'language', 'caseSensitive', 'maxResults']) {
-      $(id).addEventListener('change', () => {
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => doSearch(), 300);
-      });
+    async function loadAll() {
+      await Promise.all([loadHealth(), loadAnalytics(), loadWatcher(), loadMcpAnalytics()]);
     }
 
-    // --- Keyboard navigation ---
-    document.addEventListener('keydown', e => {
-      // '/' to focus search (only when not already in an input)
-      if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {
-        e.preventDefault();
-        $('pattern').focus();
-        $('pattern').select();
-        return;
-      }
-
-      const results = document.querySelectorAll('.result');
-      if (results.length === 0) return;
-
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        selectedIndex = Math.min(selectedIndex + 1, results.length - 1);
-        updateSelection(results);
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        selectedIndex = Math.max(selectedIndex - 1, -1);
-        updateSelection(results);
-        if (selectedIndex === -1) $('pattern').focus();
-      } else if (e.key === 'Enter' && selectedIndex >= 0 && document.activeElement.tagName !== 'INPUT') {
-        e.preventDefault();
-        const link = results[selectedIndex]?.querySelector('.result-file');
-        if (link) window.location.href = link.href;
-      }
-    });
-
-    function updateSelection(results) {
-      results.forEach((r, i) => r.classList.toggle('selected', i === selectedIndex));
-      if (selectedIndex >= 0) {
-        results[selectedIndex].scrollIntoView({ block: 'nearest' });
-      }
-    }
-
-    async function doSearch() {
-      const pattern = $('pattern').value.trim();
-      if (!pattern) {
-        $('meta').textContent = '';
-        $('results').innerHTML = '';
-        return;
-      }
-
-      // Cancel previous in-flight request
-      if (currentController) currentController.abort();
-      currentController = new AbortController();
-
-      $('loading').classList.add('active');
-      $('meta').textContent = '';
-      selectedIndex = -1;
-
-      const params = new URLSearchParams({
-        pattern,
-        caseSensitive: $('caseSensitive').checked,
-        maxResults: $('maxResults').value,
-        contextLines: 2
-      });
-      const project = $('project').value.trim();
-      const language = $('language').value;
-      if (project) params.set('project', project);
-      if (language) params.set('language', language);
-
+    async function resetStats() {
+      const btn = document.getElementById('reset-stats-btn');
+      if (!confirm('Clear all query analytics data?')) return;
+      btn.disabled = true;
+      btn.textContent = 'Clearing...';
       try {
-        const resp = await fetch('/grep?' + params, { signal: currentController.signal });
+        const resp = await fetch('/query-analytics?all=true', { method: 'DELETE' });
         const data = await resp.json();
+        btn.textContent = `Cleared ${data.deleted}`;
+        setTimeout(() => { btn.textContent = 'Reset Stats'; btn.disabled = false; }, 2000);
+        loadAnalytics();
+      } catch (err) {
+        btn.textContent = 'Error';
+        setTimeout(() => { btn.textContent = 'Reset Stats'; btn.disabled = false; }, 2000);
+      }
+    }
 
-        $('loading').classList.remove('active');
-
+    async function startWatcher() {
+      const btn = document.getElementById('start-watcher-btn');
+      const msg = document.getElementById('start-watcher-msg');
+      if (btn) btn.disabled = true;
+      if (msg) msg.textContent = 'Starting...';
+      try {
+        const resp = await fetch('/internal/start-watcher', { method: 'POST' });
+        const data = await resp.json();
         if (!resp.ok) {
-          $('meta').textContent = '';
-          $('results').innerHTML = '<div class="empty">Error: ' + (data.error || resp.statusText) + '</div>';
+          if (msg) msg.textContent = data.error || 'Failed to start';
+          if (btn) btn.disabled = false;
           return;
         }
-
-        const truncNote = data.truncated ? ' (truncated)' : '';
-        $('meta').innerHTML =
-          '<span>' + data.totalMatches + '</span> matches in <span>' + (data.matchedFiles || '?') +
-          '</span> files' + truncNote + ' &mdash; <span>' + (data.zoektDurationMs || '?') + 'ms</span>';
-
-        const html = [];
-        for (const r of data.results) {
-          const vscodeUrl = 'vscode://file/' + r.file + ':' + r.line;
-          html.push('<div class="result">');
-          html.push('  <a class="result-file" href="' + vscodeUrl + '">' + esc(r.file) + '</a>');
-          html.push('  <span class="result-line">:' + r.line + '</span>');
-          if (r.language) html.push('  <span class="badge badge-lang">' + esc(r.language) + '</span>');
-          if (r.project) html.push('  <span class="badge badge-proj">' + esc(r.project) + '</span>');
-          if (r.context && r.context.length > 0) {
-            const beforeLines = r.context.slice(0, Math.floor(r.context.length / 2));
-            const afterLines = r.context.slice(Math.floor(r.context.length / 2));
-            if (beforeLines.length) html.push('  <div class="result-context">' + esc(beforeLines.join('\n')) + '</div>');
-            html.push('  <div class="result-match">' + esc(r.match) + '</div>');
-            if (afterLines.length) html.push('  <div class="result-context">' + esc(afterLines.join('\n')) + '</div>');
-          } else {
-            html.push('  <div class="result-match">' + esc(r.match) + '</div>');
+        if (msg) msg.textContent = 'Started! Waiting for heartbeat...';
+        // Poll until watcher becomes active (up to 30s)
+        let attempts = 0;
+        const poll = setInterval(async () => {
+          attempts++;
+          try {
+            const sr = await fetch('/watcher-status');
+            const sd = await sr.json();
+            if (sd.hasActiveWatcher) {
+              clearInterval(poll);
+              loadWatcher();
+            }
+          } catch {}
+          if (attempts >= 15) {
+            clearInterval(poll);
+            if (msg) msg.textContent = 'Started but no heartbeat yet — check console';
+            if (btn) btn.disabled = false;
           }
-          html.push('</div>');
-        }
-
-        if (data.assets && data.assets.length > 0) {
-          html.push('<div class="assets-section"><h3>Assets (' + data.assets.length + ')</h3>');
-          for (const a of data.assets) {
-            html.push('<div class="asset">');
-            html.push('  <div class="asset-path">' + esc(a.file) + '</div>');
-            if (a.project) html.push('  <span class="badge badge-proj">' + esc(a.project) + '</span>');
-            if (a.match) html.push('  <div class="asset-match">' + esc(a.match) + '</div>');
-            html.push('</div>');
-          }
-          html.push('</div>');
-        }
-
-        if (data.results.length === 0 && (!data.assets || data.assets.length === 0)) {
-          html.push('<div class="empty">No results found</div>');
-        }
-
-        $('results').innerHTML = html.join('\n');
+        }, 2000);
       } catch (err) {
-        if (err.name === 'AbortError') return; // Cancelled by new search — ignore
-        $('loading').classList.remove('active');
-        $('meta').textContent = '';
-        $('results').innerHTML = '<div class="empty">Request failed: ' + err.message + '</div>';
+        if (msg) msg.textContent = 'Error: ' + err.message;
+        if (btn) btn.disabled = false;
       }
+    }
+
+    async function loadWatcher() {
+      const watcherEl = document.getElementById('watcher');
+      const freshnessEl = document.getElementById('freshness');
+      try {
+        const resp = await fetch('/watcher-status');
+        const data = await resp.json();
+        const active = data.hasActiveWatcher;
+        const w = data.watchers[0]; // primary watcher
+
+        if (w) {
+          const uptime = w.startedAt ? formatRelative(w.startedAt) : '—';
+          const lastIngest = w.counters?.lastIngestAt ? formatRelative(w.counters.lastIngestAt) : 'never';
+          const nextReconcile = w.reconciliation?.nextRunAt ? formatRelative(w.reconciliation.nextRunAt, true) : '—';
+          const wGit = w.gitHash || '—';
+          const sGit = data.serviceGitHash || '—';
+          const versionMismatch = wGit !== '—' && sGit !== '—' && wGit !== sGit;
+          const versionClass = versionMismatch ? 'health-warn' : '';
+          const versionNote = versionMismatch
+            ? `<div class="stat-row"><span class="stat-label health-warn">Version mismatch</span><span class="stat-value health-warn">Watcher (${esc(wGit)}) differs from service (${esc(sGit)}) — restart watcher to pick up parser/ingest fixes</span></div>`
+            : '';
+          watcherEl.innerHTML = `
+            <div class="stat-row">
+              <span class="stat-label">Status</span>
+              <span class="stat-value ${active ? 'health-ok' : 'health-err'}">${active ? 'active' : 'inactive'}</span>
+            </div>
+            <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value ${versionClass}">${esc(w.version || '—')} (${esc(wGit)})</span></div>
+            ${versionNote}
+            <div class="stat-row"><span class="stat-label">Watcher ID</span><span class="stat-value">${esc(w.watcherId)}</span></div>
+            <div class="stat-row"><span class="stat-label">Started</span><span class="stat-value">${uptime}</span></div>
+            <div class="stat-row"><span class="stat-label">Files ingested</span><span class="stat-value">${(w.counters?.filesIngested || 0).toLocaleString()}</span></div>
+            <div class="stat-row"><span class="stat-label">Assets ingested</span><span class="stat-value">${(w.counters?.assetsIngested || 0).toLocaleString()}</span></div>
+            <div class="stat-row"><span class="stat-label">Errors</span><span class="stat-value ${w.counters?.errorsCount > 0 ? 'health-warn' : ''}">${w.counters?.errorsCount || 0}</span></div>
+            <div class="stat-row"><span class="stat-label">Last ingest</span><span class="stat-value">${lastIngest}</span></div>
+            <div class="stat-row"><span class="stat-label">Next reconcile</span><span class="stat-value">${nextReconcile}</span></div>
+            ${data.watchers.length > 1 ? `<div class="stat-row"><span class="stat-label health-warn">Warning</span><span class="stat-value health-warn">${data.watchers.length} watchers connected</span></div>` : ''}
+          `;
+        } else {
+          watcherEl.innerHTML = `
+            <div class="stat-row">
+              <span class="stat-label">Status</span>
+              <span class="stat-value health-err">no watcher connected</span>
+            </div>
+            <div style="margin-top:12px;display:flex;align-items:center;gap:12px">
+              <button onclick="startWatcher()" id="start-watcher-btn"
+                style="padding:6px 16px;background:#0e639c;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px">
+                Start Watcher
+              </button>
+              <span id="start-watcher-msg" style="font-size:12px;color:#808080"></span>
+            </div>
+          `;
+        }
+
+        // Project freshness table
+        if (data.projectFreshness && data.projectFreshness.length > 0) {
+          freshnessEl.innerHTML = `
+            <table>
+              <tr><th>Project</th><th>Last File Modified</th><th>Last Ingest</th></tr>
+              ${data.projectFreshness.map(p => {
+                const age = p.lastFileModified ? formatRelative(p.lastFileModified) : '—';
+                const ageMs = p.lastFileModified ? Date.now() - new Date(p.lastFileModified).getTime() : Infinity;
+                const cls = ageMs > 86400000 ? 'health-err' : ageMs > 3600000 ? 'health-warn' : 'health-ok';
+                return `<tr>
+                  <td>${esc(p.project)}</td>
+                  <td class="${cls}">${age}</td>
+                  <td>${data.lastIngestAt ? formatRelative(data.lastIngestAt) : '—'}</td>
+                </tr>`;
+              }).join('')}
+            </table>
+          `;
+        } else {
+          freshnessEl.innerHTML = '<span class="loading">No project data</span>';
+        }
+      } catch (err) {
+        watcherEl.innerHTML = `<span class="error">Failed to load: ${esc(err.message)}</span>`;
+        freshnessEl.innerHTML = `<span class="error">Failed to load</span>`;
+      }
+    }
+
+    async function loadHealth() {
+      const el = document.getElementById('health');
+      try {
+        const resp = await fetch('/health');
+        const data = await resp.json();
+
+        const zoekt = data.zoekt || {};
+        const zoektStatus = (zoekt.running || zoekt.available) ? 'running' : 'stopped';
+        const zoektClass = (zoekt.running || zoekt.available) ? 'health-ok' : 'health-err';
+
+        // Update version badge in header
+        const vBadge = document.getElementById('version-badge');
+        if (vBadge) vBadge.textContent = `v${data.version || '?'} (${data.gitHash || '?'})`;
+
+        el.innerHTML = `
+          <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value health-ok">${data.status}</span></div>
+          <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value">${esc(data.version || '—')} (${esc(data.gitHash || '—')})</span></div>
+          <div class="stat-row"><span class="stat-label">Uptime</span><span class="stat-value">${formatUptime(data.uptimeSeconds)}</span></div>
+          <div class="stat-row"><span class="stat-label">Memory (RSS)</span><span class="stat-value">${data.memoryMB.rss} MB</span></div>
+          <div class="stat-row"><span class="stat-label">Heap used</span><span class="stat-value">${data.memoryMB.heapUsed} / ${data.memoryMB.heapTotal} MB</span></div>
+          <div class="stat-row"><span class="stat-label">Zoekt</span><span class="stat-value ${zoektClass}">${zoektStatus}</span></div>
+          ${zoekt.shardCount != null ? `<div class="stat-row"><span class="stat-label">Zoekt shards</span><span class="stat-value">${zoekt.shardCount}</span></div>` : ''}
+        `;
+      } catch (err) {
+        el.innerHTML = `<span class="error">Failed to load: ${esc(err.message)}</span>`;
+      }
+    }
+
+    async function loadAnalytics() {
+      const overviewEl = document.getElementById('overview');
+      const methodEl = document.getElementById('by-method');
+      const latencyEl = document.getElementById('latency');
+      const slowestEl = document.getElementById('slowest');
+
+      try {
+        const resp = await fetch('/query-analytics?summary=true');
+        const data = await resp.json();
+
+        // Overview
+        const totalQueries = data.total || 0;
+        const methods = data.byMethod || [];
+        const avgMs = methods.length > 0
+          ? (methods.reduce((s, m) => s + m.avg_ms * m.count, 0) / totalQueries).toFixed(1)
+          : '—';
+        const maxMs = methods.length > 0
+          ? Math.max(...methods.map(m => m.max_ms)).toFixed(1)
+          : '—';
+
+        overviewEl.innerHTML = `
+          <div class="stat-big">${totalQueries.toLocaleString()}</div>
+          <div class="stat-desc">total tracked queries</div>
+          <div class="stat-row" style="margin-top:12px"><span class="stat-label">Avg latency</span><span class="stat-value">${avgMs} ms</span></div>
+          <div class="stat-row"><span class="stat-label">Max latency</span><span class="stat-value">${maxMs} ms</span></div>
+          <div class="stat-row"><span class="stat-label">Endpoints tracked</span><span class="stat-value">${methods.length}</span></div>
+        `;
+
+        // Queries by method — bar chart
+        if (methods.length === 0) {
+          methodEl.innerHTML = '<span class="loading">No query data yet</span>';
+        } else {
+          const maxCount = Math.max(...methods.map(m => m.count));
+          methodEl.innerHTML = '<div class="bar-chart">' + methods.map(m => `
+            <div class="bar-row">
+              <span class="bar-label" title="${esc(m.method)}">${esc(m.method)}</span>
+              <div class="bar-track"><div class="bar-fill bar-fill-blue" style="width:${(m.count / maxCount * 100).toFixed(1)}%"></div></div>
+              <span class="bar-value">${m.count.toLocaleString()}</span>
+            </div>
+          `).join('') + '</div>';
+        }
+
+        // Latency by method — bar chart
+        if (methods.length === 0) {
+          latencyEl.innerHTML = '<span class="loading">No query data yet</span>';
+        } else {
+          const maxAvg = Math.max(...methods.map(m => m.avg_ms));
+          latencyEl.innerHTML = '<div class="bar-chart">' + methods.map(m => {
+            const color = m.avg_ms > 100 ? 'bar-fill-red' : m.avg_ms > 30 ? 'bar-fill-orange' : 'bar-fill-blue';
+            return `
+              <div class="bar-row">
+                <span class="bar-label" title="${esc(m.method)}">${esc(m.method)}</span>
+                <div class="bar-track"><div class="bar-fill ${color}" style="width:${(m.avg_ms / maxAvg * 100).toFixed(1)}%"></div></div>
+                <span class="bar-value">${m.avg_ms.toFixed(1)} ms</span>
+              </div>
+            `;
+          }).join('') + '</div>';
+        }
+
+        // Slowest queries table
+        const slowest = data.slowest || [];
+        if (slowest.length === 0) {
+          slowestEl.innerHTML = '<span class="loading">No slow queries recorded</span>';
+        } else {
+          slowestEl.innerHTML = `
+            <table>
+              <tr><th>Method</th><th>Args</th><th>Duration</th><th>Time</th></tr>
+              ${slowest.map(q => `
+                <tr>
+                  <td>${esc(q.method)}</td>
+                  <td class="mono">${esc(truncate(q.args, 80))}</td>
+                  <td class="mono" style="color:${q.duration_ms > 100 ? '#f44747' : '#4ec9b0'}">${q.duration_ms.toFixed(1)} ms</td>
+                  <td style="color:#808080">${formatTime(q.timestamp)}</td>
+                </tr>
+              `).join('')}
+            </table>
+          `;
+        }
+      } catch (err) {
+        const msg = `<span class="error">Failed to load: ${esc(err.message)}</span>`;
+        overviewEl.innerHTML = msg;
+        methodEl.innerHTML = msg;
+        latencyEl.innerHTML = msg;
+        slowestEl.innerHTML = msg;
+      }
+    }
+
+    async function resetMcpStats() {
+      const btn = document.getElementById('reset-mcp-btn');
+      if (!confirm('Clear all MCP tool analytics data?')) return;
+      btn.disabled = true;
+      btn.textContent = 'Clearing...';
+      try {
+        const resp = await fetch('/mcp-tool-analytics?all=true', { method: 'DELETE' });
+        const data = await resp.json();
+        btn.textContent = `Cleared ${data.deleted}`;
+        setTimeout(() => { btn.textContent = 'Reset'; btn.disabled = false; }, 2000);
+        loadMcpAnalytics();
+      } catch (err) {
+        btn.textContent = 'Error';
+        setTimeout(() => { btn.textContent = 'Reset'; btn.disabled = false; }, 2000);
+      }
+    }
+
+    async function loadMcpAnalytics() {
+      const overviewEl = document.getElementById('mcp-overview');
+      const byToolEl = document.getElementById('mcp-by-tool');
+      const recentEl = document.getElementById('mcp-recent');
+      const sessionsEl = document.getElementById('mcp-sessions');
+
+      try {
+        const resp = await fetch('/mcp-tool-analytics?summary=true');
+        const data = await resp.json();
+
+        // Overview
+        const total = data.total || 0;
+        const tools = data.byTool || [];
+        const sessions = data.bySessions || [];
+        const avgMs = tools.length > 0
+          ? (tools.reduce((s, t) => s + (t.avg_ms || 0) * t.count, 0) / Math.max(total, 1)).toFixed(1)
+          : '—';
+
+        overviewEl.innerHTML = `
+          <div class="stat-big">${total.toLocaleString()}</div>
+          <div class="stat-desc">total MCP tool calls</div>
+          <div class="stat-row" style="margin-top:12px"><span class="stat-label">Avg latency</span><span class="stat-value">${avgMs} ms</span></div>
+          <div class="stat-row"><span class="stat-label">Unique tools used</span><span class="stat-value">${tools.length}</span></div>
+          <div class="stat-row"><span class="stat-label">Sessions</span><span class="stat-value">${sessions.length}</span></div>
+        `;
+
+        // By tool — bar chart
+        if (tools.length === 0) {
+          byToolEl.innerHTML = '<span class="loading">No MCP tool data yet</span>';
+        } else {
+          const maxCount = Math.max(...tools.map(t => t.count));
+          byToolEl.innerHTML = '<div class="bar-chart">' + tools.map(t => {
+            const shortName = t.tool_name.replace('unreal_', '');
+            return `
+              <div class="bar-row">
+                <span class="bar-label" title="${esc(t.tool_name)}">${esc(shortName)}</span>
+                <div class="bar-track"><div class="bar-fill bar-fill-blue" style="width:${(t.count / maxCount * 100).toFixed(1)}%"></div></div>
+                <span class="bar-value">${t.count.toLocaleString()} (${(t.avg_ms || 0).toFixed(0)}ms)</span>
+              </div>
+            `;
+          }).join('') + '</div>';
+        }
+
+        // Recent calls
+        const recent = data.recent || [];
+        if (recent.length === 0) {
+          recentEl.innerHTML = '<span class="loading">No recent MCP calls</span>';
+        } else {
+          recentEl.innerHTML = `
+            <table>
+              <tr><th>Tool</th><th>Args</th><th>Duration</th><th>Size</th><th>Time</th></tr>
+              ${recent.map(c => `
+                <tr>
+                  <td>${esc(c.tool_name.replace('unreal_', ''))}</td>
+                  <td class="mono">${esc(truncate(c.args_summary, 60))}</td>
+                  <td class="mono" style="color:${(c.duration_ms || 0) > 200 ? '#f44747' : '#4ec9b0'}">${(c.duration_ms || 0).toFixed(0)} ms</td>
+                  <td class="mono">${c.result_size ? (c.result_size / 1024).toFixed(1) + 'K' : '—'}</td>
+                  <td style="color:#808080">${formatTime(c.timestamp)}</td>
+                </tr>
+              `).join('')}
+            </table>
+          `;
+        }
+
+        // Sessions
+        if (sessions.length === 0) {
+          sessionsEl.innerHTML = '<span class="loading">No session data</span>';
+        } else {
+          sessionsEl.innerHTML = `
+            <table>
+              <tr><th>Session ID</th><th>Calls</th><th>Started</th><th>Last Call</th></tr>
+              ${sessions.map(s => `
+                <tr>
+                  <td class="mono">${esc((s.session_id || '').slice(0, 8))}...</td>
+                  <td class="mono">${s.count}</td>
+                  <td style="color:#808080">${formatTime(s.started)}</td>
+                  <td style="color:#808080">${formatTime(s.last_call)}</td>
+                </tr>
+              `).join('')}
+            </table>
+          `;
+        }
+      } catch (err) {
+        const msg = `<span class="error">Failed to load: ${esc(err.message)}</span>`;
+        overviewEl.innerHTML = msg;
+        byToolEl.innerHTML = msg;
+        recentEl.innerHTML = msg;
+        sessionsEl.innerHTML = msg;
+      }
+    }
+
+    function formatUptime(seconds) {
+      if (seconds < 60) return seconds + 's';
+      if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      return h + 'h ' + m + 'm';
+    }
+
+    function formatTime(ts) {
+      if (!ts) return '—';
+      const d = new Date(ts);
+      return d.toLocaleTimeString();
+    }
+
+    function truncate(s, max) {
+      if (!s) return '';
+      return s.length > max ? s.slice(0, max) + '...' : s;
+    }
+
+    function formatRelative(ts, future = false) {
+      if (!ts) return '—';
+      const diff = future
+        ? new Date(ts).getTime() - Date.now()
+        : Date.now() - new Date(ts).getTime();
+      if (diff < 0 && !future) return 'just now';
+      const abs = Math.abs(diff);
+      if (abs < 60000) return Math.round(abs / 1000) + 's ago';
+      if (abs < 3600000) return Math.round(abs / 60000) + 'm ago';
+      if (abs < 86400000) return Math.round(abs / 3600000) + 'h ago';
+      return Math.round(abs / 86400000) + 'd ago';
     }
 
     function esc(s) {
+      if (!s) return '';
       const d = document.createElement('div');
       d.textContent = s;
       return d.innerHTML;
     }
 
-    // --- Watcher status dot ---
-    async function checkWatcher() {
-      const dot = $('watcher-dot');
-      try {
-        const resp = await fetch('/watcher-status');
-        if (!resp.ok) throw new Error(resp.statusText);
-        const data = await resp.json();
-        if (data.hasActiveWatcher) {
-          dot.style.background = '#4ec9b0';
-          dot.title = 'Watcher: active';
-        } else {
-          dot.style.background = '#f44747';
-          dot.title = 'Watcher: inactive';
-        }
-      } catch {
-        dot.style.background = '#808080';
-        dot.title = 'Watcher: unknown (service error)';
-      }
-    }
-    checkWatcher();
-    setInterval(checkWatcher, 30000);
+    loadAll();
+    setInterval(loadAll, 15000); // Auto-refresh every 15s
   </script>
 </body>
 </html>

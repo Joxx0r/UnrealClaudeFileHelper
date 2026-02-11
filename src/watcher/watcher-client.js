@@ -30,8 +30,20 @@ const RECONCILE_INTERVAL_MS = (config.watcher?.reconcileIntervalMinutes || 10) *
 // --- Watcher telemetry ---
 
 import { hostname } from 'os';
+import { execSync } from 'child_process';
 const startupTimestamp = new Date().toISOString();
 const watcherId = `${hostname()}-${process.pid}`;
+
+// Version info for mismatch detection
+let watcherVersion = 'unknown';
+let watcherGitHash = 'unknown';
+try {
+  const pkgPath = join(import.meta.dirname, '..', '..', 'package.json');
+  watcherVersion = JSON.parse(readFileSync(pkgPath, 'utf-8')).version || 'unknown';
+} catch {}
+try {
+  watcherGitHash = execSync('git rev-parse --short HEAD', { cwd: join(import.meta.dirname, '..', '..'), encoding: 'utf-8' }).trim();
+} catch {}
 let totalFilesIngested = 0;
 let totalAssetsIngested = 0;
 let totalDeletes = 0;
@@ -543,6 +555,8 @@ async function main() {
     try {
       await postJson(`${SERVICE_URL}/internal/heartbeat`, {
         watcherId,
+        version: watcherVersion,
+        gitHash: watcherGitHash,
         startedAt: startupTimestamp,
         watchedPaths: config.projects.reduce((n, p) => n + p.paths.length, 0),
         projects: config.projects.map(p => ({

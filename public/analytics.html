@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Unreal Index — Analytics</title>
+  <title>Unreal Index — Dashboard</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1e1e1e; color: #d4d4d4; padding: 20px; max-width: 1200px; margin: 0 auto; }
@@ -50,9 +50,10 @@
 </head>
 <body>
   <div class="header">
-    <h1>Search Analytics</h1>
-    <a class="nav-link" href="/">Back to Search</a>
+    <h1>Unreal Index</h1>
+    <a class="nav-link" href="/search.html">Search</a>
     <button class="refresh-btn" onclick="loadAll()">Refresh</button>
+    <span id="version-badge" style="margin-left:auto;font-size:11px;color:#555;font-family:'Cascadia Code','Consolas',monospace"></span>
   </div>
 
   <div class="grid">
@@ -206,11 +207,20 @@
           const uptime = w.startedAt ? formatRelative(w.startedAt) : '—';
           const lastIngest = w.counters?.lastIngestAt ? formatRelative(w.counters.lastIngestAt) : 'never';
           const nextReconcile = w.reconciliation?.nextRunAt ? formatRelative(w.reconciliation.nextRunAt, true) : '—';
+          const wGit = w.gitHash || '—';
+          const sGit = data.serviceGitHash || '—';
+          const versionMismatch = wGit !== '—' && sGit !== '—' && wGit !== sGit;
+          const versionClass = versionMismatch ? 'health-warn' : '';
+          const versionNote = versionMismatch
+            ? `<div class="stat-row"><span class="stat-label health-warn">Version mismatch</span><span class="stat-value health-warn">Watcher (${esc(wGit)}) differs from service (${esc(sGit)}) — restart watcher to pick up parser/ingest fixes</span></div>`
+            : '';
           watcherEl.innerHTML = `
             <div class="stat-row">
               <span class="stat-label">Status</span>
               <span class="stat-value ${active ? 'health-ok' : 'health-err'}">${active ? 'active' : 'inactive'}</span>
             </div>
+            <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value ${versionClass}">${esc(w.version || '—')} (${esc(wGit)})</span></div>
+            ${versionNote}
             <div class="stat-row"><span class="stat-label">Watcher ID</span><span class="stat-value">${esc(w.watcherId)}</span></div>
             <div class="stat-row"><span class="stat-label">Started</span><span class="stat-value">${uptime}</span></div>
             <div class="stat-row"><span class="stat-label">Files ingested</span><span class="stat-value">${(w.counters?.filesIngested || 0).toLocaleString()}</span></div>
@@ -272,8 +282,13 @@
         const zoektStatus = (zoekt.running || zoekt.available) ? 'running' : 'stopped';
         const zoektClass = (zoekt.running || zoekt.available) ? 'health-ok' : 'health-err';
 
+        // Update version badge in header
+        const vBadge = document.getElementById('version-badge');
+        if (vBadge) vBadge.textContent = `v${data.version || '?'} (${data.gitHash || '?'})`;
+
         el.innerHTML = `
           <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value health-ok">${data.status}</span></div>
+          <div class="stat-row"><span class="stat-label">Version</span><span class="stat-value">${esc(data.version || '—')} (${esc(data.gitHash || '—')})</span></div>
           <div class="stat-row"><span class="stat-label">Uptime</span><span class="stat-value">${formatUptime(data.uptimeSeconds)}</span></div>
           <div class="stat-row"><span class="stat-label">Memory (RSS)</span><span class="stat-value">${data.memoryMB.rss} MB</span></div>
           <div class="stat-row"><span class="stat-label">Heap used</span><span class="stat-value">${data.memoryMB.heapUsed} / ${data.memoryMB.heapTotal} MB</span></div>

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Unreal Index Search</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
+    .header { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+    h1 { font-size: 1.4em; color: #569cd6; }
+    .nav-link { font-size: 13px; color: #808080; text-decoration: none; }
+    .nav-link:hover { color: #569cd6; }
+    .search-bar { display: flex; gap: 8px; margin-bottom: 12px; position: relative; }
+    #pattern { flex: 1; padding: 8px 12px; font-size: 14px; font-family: 'Cascadia Code', 'Consolas', monospace;
+      background: #2d2d2d; border: 1px solid #3e3e3e; color: #d4d4d4; border-radius: 4px; }
+    #pattern:focus { outline: none; border-color: #569cd6; }
+    button { padding: 8px 16px; background: #0e639c; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+    button:hover { background: #1177bb; }
+    .loading { display: none; font-size: 12px; color: #569cd6; margin-left: 8px; align-self: center; }
+    .loading.active { display: inline; }
+    .filters { display: flex; gap: 12px; margin-bottom: 16px; font-size: 13px; align-items: center; }
+    .filters label { display: flex; align-items: center; gap: 4px; }
+    .filters select, .filters input[type="text"] {
+      background: #2d2d2d; border: 1px solid #3e3e3e; color: #d4d4d4; padding: 4px 8px; border-radius: 3px; font-size: 13px; }
+    .meta { font-size: 13px; color: #808080; margin-bottom: 12px; }
+    .meta span { color: #569cd6; }
+    .result { border-left: 3px solid #3e3e3e; margin-bottom: 8px; padding: 4px 0 4px 12px; }
+    .result:hover { border-left-color: #569cd6; }
+    .result.selected { border-left-color: #569cd6; background: #252526; }
+    .result-file { font-size: 13px; color: #4ec9b0; cursor: pointer; text-decoration: none; }
+    .result-file:hover { text-decoration: underline; }
+    .result-line { font-size: 12px; color: #808080; margin-left: 4px; }
+    .result-match { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 13px; white-space: pre-wrap;
+      background: #252526; padding: 2px 6px; margin-top: 2px; border-radius: 2px; overflow-x: auto; }
+    .result-context { font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px; color: #666;
+      white-space: pre-wrap; padding: 0 6px; }
+    .assets-section { margin-top: 20px; border-top: 1px solid #3e3e3e; padding-top: 12px; }
+    .assets-section h3 { font-size: 1em; color: #ce9178; margin-bottom: 8px; }
+    .asset { padding: 4px 0 4px 12px; border-left: 3px solid #3e3e3e; margin-bottom: 6px; }
+    .asset-path { color: #ce9178; font-size: 13px; }
+    .asset-match { font-size: 12px; color: #808080; margin-top: 2px; }
+    .empty { color: #808080; font-style: italic; margin-top: 20px; }
+    .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-left: 6px; }
+    .badge-lang { background: #264f78; color: #9cdcfe; }
+    .badge-proj { background: #4d3519; color: #ce9178; }
+    .shortcut-hint { font-size: 11px; color: #555; margin-top: 4px; }
+    kbd { background: #333; padding: 1px 5px; border-radius: 3px; border: 1px solid #555; font-size: 11px; font-family: inherit; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Unreal Index Search <span id="watcher-dot" title="Watcher: checking..." style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#808080;margin-left:4px;vertical-align:middle"></span></h1>
+    <a class="nav-link" href="/">Dashboard</a>
+  </div>
+  <div class="search-bar">
+    <input type="text" id="pattern" placeholder="Search pattern (regex supported)" autofocus />
+    <button onclick="doSearch()">Search</button>
+    <span id="loading" class="loading">Searching...</span>
+  </div>
+  <div class="filters">
+    <label>Project: <input type="text" id="project" placeholder="all" style="width:120px" /></label>
+    <label>Language:
+      <select id="language">
+        <option value="">All</option>
+        <option value="cpp">C++</option>
+        <option value="angelscript">AngelScript</option>
+        <option value="config">Config</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="caseSensitive" checked /> Case sensitive</label>
+    <label>Max:
+      <select id="maxResults">
+        <option value="25">25</option>
+        <option value="50" selected>50</option>
+        <option value="100">100</option>
+        <option value="200">200</option>
+      </select>
+    </label>
+  </div>
+  <div class="shortcut-hint">
+    <kbd>/</kbd> focus search &nbsp; <kbd>Up</kbd>/<kbd>Down</kbd> navigate results &nbsp; <kbd>Enter</kbd> open in VS Code
+  </div>
+  <div id="meta" class="meta"></div>
+  <div id="results"></div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+
+    // --- Debounced live search ---
+    let debounceTimer = null;
+    let currentController = null;
+    let selectedIndex = -1;
+
+    $('pattern').addEventListener('input', () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => doSearch(), 300);
+    });
+
+    $('pattern').addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        clearTimeout(debounceTimer);
+        doSearch();
+      }
+    });
+
+    // Debounce filter changes too
+    for (const id of ['project', 'language', 'caseSensitive', 'maxResults']) {
+      $(id).addEventListener('change', () => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => doSearch(), 300);
+      });
+    }
+
+    // --- Keyboard navigation ---
+    document.addEventListener('keydown', e => {
+      // '/' to focus search (only when not already in an input)
+      if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {
+        e.preventDefault();
+        $('pattern').focus();
+        $('pattern').select();
+        return;
+      }
+
+      const results = document.querySelectorAll('.result');
+      if (results.length === 0) return;
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        selectedIndex = Math.min(selectedIndex + 1, results.length - 1);
+        updateSelection(results);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        selectedIndex = Math.max(selectedIndex - 1, -1);
+        updateSelection(results);
+        if (selectedIndex === -1) $('pattern').focus();
+      } else if (e.key === 'Enter' && selectedIndex >= 0 && document.activeElement.tagName !== 'INPUT') {
+        e.preventDefault();
+        const link = results[selectedIndex]?.querySelector('.result-file');
+        if (link) window.location.href = link.href;
+      }
+    });
+
+    function updateSelection(results) {
+      results.forEach((r, i) => r.classList.toggle('selected', i === selectedIndex));
+      if (selectedIndex >= 0) {
+        results[selectedIndex].scrollIntoView({ block: 'nearest' });
+      }
+    }
+
+    async function doSearch() {
+      const pattern = $('pattern').value.trim();
+      if (!pattern) {
+        $('meta').textContent = '';
+        $('results').innerHTML = '';
+        return;
+      }
+
+      // Cancel previous in-flight request
+      if (currentController) currentController.abort();
+      currentController = new AbortController();
+
+      $('loading').classList.add('active');
+      $('meta').textContent = '';
+      selectedIndex = -1;
+
+      const params = new URLSearchParams({
+        pattern,
+        caseSensitive: $('caseSensitive').checked,
+        maxResults: $('maxResults').value,
+        contextLines: 2
+      });
+      const project = $('project').value.trim();
+      const language = $('language').value;
+      if (project) params.set('project', project);
+      if (language) params.set('language', language);
+
+      try {
+        const resp = await fetch('/grep?' + params, { signal: currentController.signal });
+        const data = await resp.json();
+
+        $('loading').classList.remove('active');
+
+        if (!resp.ok) {
+          $('meta').textContent = '';
+          $('results').innerHTML = '<div class="empty">Error: ' + (data.error || resp.statusText) + '</div>';
+          return;
+        }
+
+        const truncNote = data.truncated ? ' (truncated)' : '';
+        $('meta').innerHTML =
+          '<span>' + data.totalMatches + '</span> matches in <span>' + (data.matchedFiles || '?') +
+          '</span> files' + truncNote + ' &mdash; <span>' + (data.zoektDurationMs || '?') + 'ms</span>';
+
+        const html = [];
+        for (const r of data.results) {
+          const vscodeUrl = 'vscode://file/' + r.file + ':' + r.line;
+          html.push('<div class="result">');
+          html.push('  <a class="result-file" href="' + vscodeUrl + '">' + esc(r.file) + '</a>');
+          html.push('  <span class="result-line">:' + r.line + '</span>');
+          if (r.language) html.push('  <span class="badge badge-lang">' + esc(r.language) + '</span>');
+          if (r.project) html.push('  <span class="badge badge-proj">' + esc(r.project) + '</span>');
+          if (r.context && r.context.length > 0) {
+            const beforeLines = r.context.slice(0, Math.floor(r.context.length / 2));
+            const afterLines = r.context.slice(Math.floor(r.context.length / 2));
+            if (beforeLines.length) html.push('  <div class="result-context">' + esc(beforeLines.join('\n')) + '</div>');
+            html.push('  <div class="result-match">' + esc(r.match) + '</div>');
+            if (afterLines.length) html.push('  <div class="result-context">' + esc(afterLines.join('\n')) + '</div>');
+          } else {
+            html.push('  <div class="result-match">' + esc(r.match) + '</div>');
+          }
+          html.push('</div>');
+        }
+
+        if (data.assets && data.assets.length > 0) {
+          html.push('<div class="assets-section"><h3>Assets (' + data.assets.length + ')</h3>');
+          for (const a of data.assets) {
+            html.push('<div class="asset">');
+            html.push('  <div class="asset-path">' + esc(a.file) + '</div>');
+            if (a.project) html.push('  <span class="badge badge-proj">' + esc(a.project) + '</span>');
+            if (a.match) html.push('  <div class="asset-match">' + esc(a.match) + '</div>');
+            html.push('</div>');
+          }
+          html.push('</div>');
+        }
+
+        if (data.results.length === 0 && (!data.assets || data.assets.length === 0)) {
+          html.push('<div class="empty">No results found</div>');
+        }
+
+        $('results').innerHTML = html.join('\n');
+      } catch (err) {
+        if (err.name === 'AbortError') return; // Cancelled by new search — ignore
+        $('loading').classList.remove('active');
+        $('meta').textContent = '';
+        $('results').innerHTML = '<div class="empty">Request failed: ' + err.message + '</div>';
+      }
+    }
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    // --- Watcher status dot ---
+    async function checkWatcher() {
+      const dot = $('watcher-dot');
+      try {
+        const resp = await fetch('/watcher-status');
+        if (!resp.ok) throw new Error(resp.statusText);
+        const data = await resp.json();
+        if (data.hasActiveWatcher) {
+          dot.style.background = '#4ec9b0';
+          dot.title = 'Watcher: active';
+        } else {
+          dot.style.background = '#f44747';
+          dot.title = 'Watcher: inactive';
+        }
+      } catch {
+        dot.style.background = '#808080';
+        dot.title = 'Watcher: unknown (service error)';
+      }
+    }
+    checkWatcher();
+    setInterval(checkWatcher, 30000);
+  </script>
+</body>
+</html>

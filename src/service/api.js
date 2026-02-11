@@ -3,12 +3,24 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { deflateSync, inflateSync } from 'zlib';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { rankResults, groupResultsByFile } from './search-ranking.js';
 import { contentHash } from './trigram.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SLOW_QUERY_MS = 100;
+
+// Read git version at startup (commit hash for version comparison)
+let SERVICE_VERSION = 'unknown';
+try {
+  const pkgPath = join(__dirname, '..', '..', 'package.json');
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+  SERVICE_VERSION = pkg.version || 'unknown';
+} catch {}
+let SERVICE_GIT_HASH = 'unknown';
+try {
+  SERVICE_GIT_HASH = execSync('git rev-parse --short HEAD', { cwd: join(__dirname, '..', '..'), encoding: 'utf-8' }).trim();
+} catch {}
 
 // LRU+TTL cache for /grep results — agents often repeat the same search
 class GrepCache {
@@ -266,6 +278,8 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     const mem = process.memoryUsage();
     const response = {
       status: 'ok',
+      version: SERVICE_VERSION,
+      gitHash: SERVICE_GIT_HASH,
       timestamp: new Date().toISOString(),
       uptimeSeconds: Math.round(process.uptime()),
       memoryMB: {
@@ -323,7 +337,9 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
       watchers,
       lastIngestAt: watcherState.lastIngestAt,
       ingestCounts: watcherState.ingestCounts,
-      projectFreshness
+      projectFreshness,
+      serviceVersion: SERVICE_VERSION,
+      serviceGitHash: SERVICE_GIT_HASH
     });
   });
 
