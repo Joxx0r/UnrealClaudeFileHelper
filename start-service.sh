@@ -8,6 +8,9 @@ cd "$(dirname "$0")"
 # Add Go/Zoekt binaries to PATH
 export PATH="$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bin:$PATH"
 
+# Give Node enough heap for the in-memory index (~1.3GB for large projects)
+export NODE_OPTIONS="--max-old-space-size=3072"
+
 if [ "$1" = "--bg" ]; then
   screen -dmS unreal-index bash -c "node src/service/index.js 2>&1 | tee /tmp/unreal-index.log"
   sleep 3
@@ -22,4 +25,5 @@ if [ "$1" = "--bg" ]; then
   fi
 else
   exec node src/service/index.js
+
 fi

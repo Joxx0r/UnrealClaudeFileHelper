@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 import * as p from '@clack/prompts';
-import { existsSync, readdirSync, unlinkSync } from 'fs';
+import { existsSync, readdirSync, unlinkSync, mkdirSync } from 'fs';
 import { writeFile, readFile } from 'fs/promises';
 import { join, dirname, basename, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
 import http from 'http';
+import { installHooks } from './hooks/install.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -498,9 +499,110 @@ async function actionFullSetup() {
         // Auto-check Zoekt prerequisites so users know what to expect
         await actionCheckPrerequisites();
 
+        // Offer to install search instructions and hooks
+        await stageProjectIntegration(projectRoot);
+
         return config;
       }
     }
+  }
+}
+
+// ── Project integration (CLAUDE.local.md + hooks) ────────
+
+async function installSearchInstructions(projectDir) {
+  const claudeDir = join(projectDir, '.claude');
+  const claudeLocalMdPath = join(claudeDir, 'CLAUDE.local.md');
+  const searchInstructions = await readFile(join(__dirname, 'hooks', 'search-instructions.md'), 'utf-8');
+
+  if (!existsSync(claudeDir)) {
+    mkdirSync(claudeDir, { recursive: true });
+  }
+
+  if (existsSync(claudeLocalMdPath)) {
+    const existing = await readFile(claudeLocalMdPath, 'utf-8');
+    if (existing.includes('USE UNREAL INDEX MCP TOOLS')) {
+      return { path: claudeLocalMdPath, action: 'already present' };
+    }
+    await writeFile(claudeLocalMdPath, existing.trimEnd() + '\n\n' + searchInstructions + '\n');
+    return { path: claudeLocalMdPath, action: 'appended' };
+  } else {
+    await writeFile(claudeLocalMdPath, '# Claude Code Local Instructions\n\n' + searchInstructions + '\n');
+    return { path: claudeLocalMdPath, action: 'created' };
+  }
+}
+
+async function stageProjectIntegration(defaultProjectRoot) {
+  // Always offer search instructions for CLAUDE.local.md
+  const installInstructions = cancelGuard(await p.confirm({
+    message: 'Add search instructions to your project\'s CLAUDE.local.md? (tells Claude to prefer MCP tools)',
+    initialValue: true,
+  }));
+
+  let projectDir = null;
+
+  if (installInstructions) {
+    const dirInput = cancelGuard(await p.text({
+      message: 'Claude Code working directory (where .claude/ exists or will be created):',
+      placeholder: defaultProjectRoot || 'D:/Code/UE/MyProject',
+      defaultValue: defaultProjectRoot || '',
+      validate: (value) => {
+        if (!value.trim()) return 'Please enter a path.';
+      },
+    }));
+    projectDir = cleanPath(dirInput);
+
+    try {
+      const result = await installSearchInstructions(projectDir);
+      p.log.success(`CLAUDE.local.md ${result.action}: ${result.path}`);
+    } catch (err) {
+      p.log.error(`Could not update CLAUDE.local.md: ${err.message}`);
+    }
+  }
+
+  // Optionally install PreToolUse hooks (proxy binary)
+  const installHooksChoice = cancelGuard(await p.confirm({
+    message: 'Also install PreToolUse hooks? (intercepts Grep/Glob/Bash calls for faster indexed results)',
+    initialValue: true,
+  }));
+
+  if (!installHooksChoice) {
+    p.log.info('Skipped hook installation.');
+    p.log.info('You can install hooks later by running: install-hooks.bat <project-directory>');
+    return;
+  }
+
+  // If we already have the project dir from above, reuse it; otherwise ask
+  if (!projectDir) {
+    const dirInput = cancelGuard(await p.text({
+      message: 'Claude Code working directory (where .claude/ exists or will be created):',
+      placeholder: defaultProjectRoot || 'D:/Code/UE/MyProject',
+      defaultValue: defaultProjectRoot || '',
+      validate: (value) => {
+        if (!value.trim()) return 'Please enter a path.';
+      },
+    }));
+    projectDir = cleanPath(dirInput);
+  }
+
+  const s = p.spinner();
+  s.start('Installing hooks...');
+
+  try {
+    const result = await installHooks(projectDir, { silent: true, tryGo: true });
+    s.stop('Hooks installed.');
+
+    const lines = [];
+    lines.push(`  Proxy: ${result.compiled ? 'Go binary (compiled)' : 'Node.js (.mjs fallback)'}`);
+    lines.push(`  Hooks dir: ${result.hooksDir}`);
+    lines.push(`  Settings updated: ${result.settingsPath}`);
+    lines.push('');
+    lines.push('  Restart Claude Code to activate.');
+    p.note(lines.join('\n'), 'Hooks installed');
+  } catch (err) {
+    s.stop('Hook installation failed.');
+    p.log.error(`Could not install hooks: ${err.message}`);
+    p.log.info('You can retry later by running: install-hooks.bat <project-directory>');
   }
 }
 
@@ -684,6 +786,7 @@ async function main() {
               hint: running ? `running on port ${port}` : 'launch the index service',
             }]
           : []),
+        { value: 'hooks', label: 'Project integration', hint: 'CLAUDE.local.md + PreToolUse hooks' },
         { value: 'prereqs', label: 'Check prerequisites', hint: 'Go, Zoekt, WSL status' },
         { value: 'exit', label: 'Exit' },
       ],
@@ -726,6 +829,10 @@ async function main() {
         } else {
           await actionStartService(port);
         }
+        break;
+
+      case 'hooks':
+        await stageProjectIntegration(config?.projects?.[0]?.paths?.[0] ? dirname(config.projects[0].paths[0]) : null);
         break;
 
       case 'prereqs':

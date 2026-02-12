@@ -694,6 +694,24 @@ export function createApi(database, indexer, queryPool = null, { zoektClient = n
     }
   });
 
+  app.post('/internal/restart-service', (req, res) => {
+    console.log('[API] Service restart requested from dashboard');
+    res.json({ ok: true, message: 'Restarting service...' });
+    // Spawn a new service process, then exit the current one.
+    // The new process will kill us via the kill-on-startup logic in index.js.
+    setTimeout(() => {
+      const child = spawn(process.execPath, [join(__dirname, 'index.js')], {
+        cwd: join(__dirname, '..', '..'),
+        stdio: 'ignore',
+        detached: true,
+        env: { ...process.env },
+      });
+      child.unref();
+      // Give the new process a moment to start, then exit
+      setTimeout(() => process.exit(0), 1000);
+    }, 500);
+  });
+
   app.get('/status', (req, res) => {
     try {
       const allStatus = database.getAllIndexStatus();

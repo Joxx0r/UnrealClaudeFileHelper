@@ -150,7 +150,32 @@ Note: The watcher runs in the foreground and will block the terminal. Tell the u
 - Let it run in this terminal (it shows progress as files are indexed)
 - Or open a separate terminal to run it
 
-### Step 9: Verify
+### Step 9: Install PreToolUse hooks (optional but recommended)
+
+The hooks intercept Grep, Glob, and Bash tool calls and route them through the unreal-index service for faster results. The setup wizard (Step 5) should have already prompted for this. If the user skipped it, they can install hooks now.
+
+The hook needs to be installed into the user's **project working directory** — the directory where they run Claude Code (where `.claude/` exists or will be created). This is typically the project's `Script/` directory or project root.
+
+```bash
+node "$USERPROFILE/.claude/repos/embark-claude-index/src/hooks/install.js" "<PROJECT_DIR>"
+```
+
+Replace `<PROJECT_DIR>` with the actual project path (e.g., `D:\p4\games\Games\MyProject\Script`).
+
+Alternatively, from the repo root on Windows:
+```bash
+"$USERPROFILE/.claude/repos/embark-claude-index/install-hooks.bat" "<PROJECT_DIR>"
+```
+
+This will:
+- Compile a Go proxy binary (or fall back to Node.js if Go is not available)
+- Deploy it to `<PROJECT_DIR>/.claude/hooks/`
+- Update `<PROJECT_DIR>/.claude/settings.json` with the PreToolUse hook config
+- Create/update `<PROJECT_DIR>/.claude/CLAUDE.local.md` with search instructions
+
+Tell the user they need to **restart Claude Code** after installing hooks.
+
+### Step 10: Verify
 
 After the watcher outputs "initial scan complete" (may take a few minutes on first run), verify the index has data:
 

@@ -57,6 +57,16 @@
     .action-btn:disabled { background: #333; color: #666; cursor: default; }
     .action-btn-warn { background: #6d4c1d; }
     .action-btn-warn:hover { background: #8a6020; }
+    .cmd-panel { background: #1a1a2e; border: 1px solid #3e3e3e; border-radius: 6px; padding: 12px 16px; margin-bottom: 20px; display: none; }
+    .cmd-panel.visible { display: block; }
+    .cmd-panel h3 { font-size: 12px; color: #569cd6; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .cmd-row { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; font-size: 12px; }
+    .cmd-row:last-child { margin-bottom: 0; }
+    .cmd-label { color: #808080; width: 120px; flex-shrink: 0; }
+    .cmd-code { background: #2d2d2d; padding: 4px 8px; border-radius: 3px; font-family: 'Cascadia Code', 'Consolas', monospace; color: #ce9178; flex: 1; overflow-x: auto; white-space: nowrap; cursor: pointer; }
+    .cmd-code:hover { background: #3e3e3e; }
+    .cmd-toggle { background: none; border: 1px solid #3e3e3e; color: #808080; padding: 4px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .cmd-toggle:hover { color: #d4d4d4; border-color: #569cd6; }
     .range-filter { display: flex; gap: 2px; }
     .range-btn { background: #2d2d2d; color: #808080; border: 1px solid #3e3e3e; padding: 4px 10px; cursor: pointer; font-size: 12px; }
     .range-btn:first-child { border-radius: 3px 0 0 3px; }
@@ -84,6 +94,20 @@
     <span id="version-badge" style="margin-left:auto;font-size:11px;color:#555;font-family:'Cascadia Code','Consolas',monospace"></span>
   </div>
 
+  <!-- Quick Commands (toggle) -->
+  <div style="margin-bottom:8px;text-align:right">
+    <button class="cmd-toggle" onclick="toggleCmds()" id="cmd-toggle-btn">Show Commands</button>
+  </div>
+  <div class="cmd-panel" id="cmd-panel">
+    <h3>Quick Commands (click to copy)</h3>
+    <div class="cmd-row"><span class="cmd-label">Start service</span><code class="cmd-code" onclick="copyCmd(this)">"%USERPROFILE%\.claude\repos\embark-claude-index\start-service.bat"</code></div>
+    <div class="cmd-row"><span class="cmd-label">Stop service</span><code class="cmd-code" onclick="copyCmd(this)">wsl -- bash -c 'screen -S unreal-index -X quit'</code></div>
+    <div class="cmd-row"><span class="cmd-label">Service logs</span><code class="cmd-code" onclick="copyCmd(this)">wsl -- bash -c 'tail -50 /tmp/unreal-index.log'</code></div>
+    <div class="cmd-row"><span class="cmd-label">Start watcher</span><code class="cmd-code" onclick="copyCmd(this)">node "%USERPROFILE%\.claude\repos\embark-claude-index\src\watcher\watcher-client.js"</code></div>
+    <div class="cmd-row"><span class="cmd-label">Install hooks</span><code class="cmd-code" onclick="copyCmd(this)">"%USERPROFILE%\.claude\repos\embark-claude-index\install-hooks.bat" &lt;PROJECT_DIR&gt;</code></div>
+    <div class="cmd-row"><span class="cmd-label">Run setup</span><code class="cmd-code" onclick="copyCmd(this)">wsl -- bash -c 'cd ~/.claude/repos/embark-claude-index && node src/setup.js'</code></div>
+  </div>
+
   <!-- System Overview -->
   <div class="overview-bar" id="system-overview">
     <div class="overview-item" id="ov-service">
@@ -92,6 +116,7 @@
         <div class="overview-name">Service</div>
         <div class="overview-detail" id="ov-service-detail">Checking...</div>
       </div>
+      <div class="overview-action" id="ov-service-action"></div>
     </div>
     <div class="overview-item" id="ov-watcher">
       <div class="overview-dot dot-gray" id="ov-watcher-dot"></div>
@@ -190,6 +215,23 @@
   </div>
 
   <script>
+    function toggleCmds() {
+      const panel = document.getElementById('cmd-panel');
+      const btn = document.getElementById('cmd-toggle-btn');
+      panel.classList.toggle('visible');
+      btn.textContent = panel.classList.contains('visible') ? 'Hide Commands' : 'Show Commands';
+    }
+
+    function copyCmd(el) {
+      const text = el.textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        const orig = el.textContent;
+        el.textContent = 'Copied!';
+        el.style.color = '#4ec9b0';
+        setTimeout(() => { el.textContent = orig; el.style.color = ''; }, 1500);
+      });
+    }
+
     let currentRange = 'all';
 
     function getSinceParam() {
@@ -623,6 +665,7 @@
       const zoektAction = document.getElementById('ov-zoekt-action');
 
       // Service health
+      const serviceAction = document.getElementById('ov-service-action');
       try {
         const resp = await fetch('/health');
         const data = await resp.json();
@@ -636,9 +679,11 @@
           serviceDot.className = 'overview-dot dot-green';
           serviceDetail.textContent = `Up ${formatUptime(data.uptimeSeconds)} · ${data.memoryMB.rss} MB RSS · Heap ${heapPct}%`;
         }
+        serviceAction.innerHTML = '<button class="action-btn action-btn-warn" onclick="overviewRestartService(this)">Restart</button>';
       } catch {
         serviceDot.className = 'overview-dot dot-red';
         serviceDetail.innerHTML = 'Not responding — restart with: <code>wsl -- bash -c \'cd ~/.claude/repos/embark-claude-index && ./start-service.sh --bg\'</code>';
+        serviceAction.innerHTML = '';
       }
 
       // Watcher status
@@ -757,6 +802,36 @@
         btn.textContent = 'Error';
         setTimeout(() => { btn.textContent = 'Restart'; btn.disabled = false; }, 3000);
       }
+    }
+
+    async function overviewRestartService(btn) {
+      if (!confirm('Restart the indexing service? The dashboard will reconnect automatically.')) return;
+      btn.disabled = true;
+      btn.textContent = 'Restarting...';
+      try {
+        await fetch('/internal/restart-service', { method: 'POST' });
+      } catch {}
+      // Wait for service to come back up
+      document.getElementById('ov-service-dot').className = 'overview-dot dot-yellow';
+      document.getElementById('ov-service-detail').textContent = 'Restarting...';
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        try {
+          const resp = await fetch('/health');
+          if (resp.ok) {
+            clearInterval(poll);
+            loadAllWithOverview();
+          }
+        } catch {}
+        if (attempts >= 30) {
+          clearInterval(poll);
+          document.getElementById('ov-service-dot').className = 'overview-dot dot-red';
+          document.getElementById('ov-service-detail').textContent = 'Failed to restart — check logs';
+          btn.textContent = 'Restart';
+          btn.disabled = false;
+        }
+      }, 2000);
     }
 
     async function loadAllWithOverview() {
