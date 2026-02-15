@@ -9,7 +9,8 @@ if not exist config.json (
 )
 
 echo Starting index service in WSL...
-start "" /B wsl -- bash -c "export PATH=$HOME/go/bin:/usr/local/go/bin:$PATH && cd ~/repos/unreal-index && exec node src/service/index.js 2>&1 | tee /tmp/unreal-index.log"
+REM Use the Windows-mounted repo so it always matches the working tree
+start "" /B wsl -- bash -c "export PATH=$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bin:$PATH && cd /mnt/c/Users/Joxx0r/.claude/repos/embark-claude-index && exec node src/service/index.js 2>&1 | tee /tmp/unreal-index.log"
 
 :: Wait for service to come up
 echo Waiting for service on port 3847...

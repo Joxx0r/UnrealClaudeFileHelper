@@ -36,7 +36,9 @@ echo  Starting service in WSL...
 echo.
 
 REM Find the repo in WSL and start the service
-wsl -- bash -c "export PATH=$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bin:$PATH; for d in $HOME/repos/unreal-index $HOME/.claude/repos/embark-claude-index $HOME/.claude/repos/unreal-index; do if [ -f $d/start-service.sh ]; then cd $d && bash start-service.sh --bg; exit; fi; done; echo ERROR: Repo not found in WSL"
+REM Prefer the Windows-mounted repo (/mnt/c/...) first — it has the latest working-tree changes.
+REM WSL-native clones are checked as fallback only.
+wsl -- bash -c "export PATH=$HOME/local/node22/bin:$HOME/go/bin:/usr/local/go/bin:$PATH; for d in /mnt/c/Users/*/.[cC]laude/repos/embark-claude-index $HOME/.claude/repos/embark-claude-index $HOME/repos/unreal-index $HOME/.claude/repos/unreal-index; do if [ -f $d/start-service.sh ]; then cd $d && bash start-service.sh --bg; exit; fi; done; echo ERROR: Repo not found in WSL"
 
 if !ERRORLEVEL! EQU 0 (
     echo.
